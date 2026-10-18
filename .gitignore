@@ -1,0 +1,15 @@
+# G AGENT (v3.1) - Pure C Build & Runtime Ignore Rules
+*.o
+*.obj
+*.exe.tmp
+*.gagent.tmp
+*.gagent.verified.tmp
+gagent_runtime
+
+# Ephemeral Sandbox & Vault runtime directories
+.gagent_sandbox/
+Gagent_Workspace/
+
+# Local secrets
+.env
+.env.*
