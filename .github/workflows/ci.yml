@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Unit and mock-server tests (Docker tests skip themselves when Docker is missing)
+        run: cargo test --release
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: gagent-${{ matrix.os }}
+          path: |
+            target/release/gagent
+            target/release/gagent.exe
+            target/release/gagent-cli
+            target/release/gagent-cli.exe
+          if-no-files-found: ignore

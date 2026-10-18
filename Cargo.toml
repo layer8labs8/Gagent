@@ -1,0 +1,64 @@
+[package]
+name = "gagent"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Gagent: a native desktop coding agent for Gemini with a Docker sandbox and Google Drive sync"
+license = "MIT"
+repository = "https://github.com/layer8labs8/Gagent"
+readme = "README.md"
+default-run = "gagent"
+
+[lib]
+name = "gagent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gagent"
+path = "src/bin/gagent.rs"
+
+[[bin]]
+name = "gagent-cli"
+path = "src/bin/gagent-cli.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "7"
+dunce = "1"
+eframe = { version = "0.37", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "clipboard",
+    "links",
+    "wayland",
+    "x11",
+] }
+fastrand = "2"
+globset = "0.4.19"
+ignore = "0.4"
+opener = "0.9"
+regex = "1"
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+similar = "3"
+ureq = { version = "3", features = ["json", "platform-verifier"] }
+
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "3", features = ["json", "platform-verifier", "win-system-proxy"] }
+
+[dev-dependencies]
+tempfile = "3"
+tiny_http = "0.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+opt-level = 1
