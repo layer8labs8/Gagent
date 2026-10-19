@@ -10,7 +10,7 @@ Open a folder, describe a task, and Gagent reads, edits, runs and tests your cod
 Gemini · NVIDIA · any OpenAI-compatible API · one small native app · no browser · no Docker needed
 
 [![CI](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml/badge.svg)](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-free%20to%20use%2C%20not%20for%20sale-blue.svg)](#license)
 [![Release](https://img.shields.io/github/v/release/layer8labs8/Gagent?include_prereleases)](https://github.com/layer8labs8/Gagent/releases)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 [![Stars](https://img.shields.io/github/stars/layer8labs8/Gagent?style=social)](https://github.com/layer8labs8/Gagent/stargazers)
@@ -220,4 +220,15 @@ build.nvidia.com are names of their owners and are used only to say which servic
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+**Free to use, not for sale.** Gagent is source-available under the MIT License plus the Commons Clause and a few
+additional terms; the full text is in [LICENSE](LICENSE).
+
+- Anyone, including companies, may use it for any purpose and may change it. What you build with it is yours.
+- You may not sell it: no selling of a modified version, of a product built from the code, or of paid hosting or paid
+  support for it. If you want to, ask in an issue; permission can be given in writing.
+- Keep the credit: modified versions and works that include a substantial part of the code must say
+  "Based on Gagent by layer8labs8" with a link to this repository.
+- The name Gagent, the G logo and layer8labs8 are not part of the license.
+
+Because it limits selling, this is not an OSI-approved "open source" license; it is source-available.
+The libraries Gagent is built with keep their own licenses; each release lists them in `THIRD-PARTY-LICENSES.txt`.

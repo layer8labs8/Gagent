@@ -25,11 +25,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --release
+      - name: List the libraries and their licenses
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          cargo metadata --format-version 1 --locked | "$PY" scripts/third_party.py > THIRD-PARTY-LICENSES.txt
+          wc -l THIRD-PARTY-LICENSES.txt
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist/Gagent
-          cp target/release/gagent target/release/gagent-cli README.md LICENSE dist/Gagent/
+          cp target/release/gagent target/release/gagent-cli README.md LICENSE THIRD-PARTY-LICENSES.txt dist/Gagent/
           cp -r scripts dist/Gagent/
           tar -C dist -czf Gagent-${{ matrix.name }}.tar.gz Gagent
       - name: Package (Windows)
@@ -38,7 +44,7 @@ jobs:
         run: |
           New-Item -ItemType Directory dist/Gagent | Out-Null
           Copy-Item target/release/gagent.exe dist/Gagent/Gagent.exe
-          Copy-Item target/release/gagent-cli.exe, README.md, LICENSE dist/Gagent/
+          Copy-Item target/release/gagent-cli.exe, README.md, LICENSE, THIRD-PARTY-LICENSES.txt dist/Gagent/
           Copy-Item -Recurse scripts dist/Gagent/scripts
           Compress-Archive -Path dist/Gagent -DestinationPath Gagent-${{ matrix.name }}.zip
           # The program on its own, for a one-click download.
@@ -51,6 +57,12 @@ jobs:
             Gagent-${{ matrix.name }}.zip
             Gagent.exe
           if-no-files-found: ignore
+      - name: Keep one copy of the license list for the release page
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenses
+          path: THIRD-PARTY-LICENSES.txt
 
   publish:
     needs: build
@@ -75,4 +87,5 @@ jobs:
             **Linux:** unpack `Gagent-linux-x86_64.tar.gz` and run `gagent`, or use `scripts/install-ubuntu.sh`.
 
             Open **Settings**, pick a service and paste your API key (see the README for where to get one).
-            Checksums are in `SHA256SUMS.txt`.
+            Checksums are in `SHA256SUMS.txt`. The libraries built into Gagent and their licenses are listed in
+            `THIRD-PARTY-LICENSES.txt`. Gagent is free to use, not for sale: see `LICENSE`.
