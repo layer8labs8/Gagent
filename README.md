@@ -207,9 +207,10 @@ nothing that starts in the background without being asked. [TODO.md](TODO.md) li
 
 ## About this project
 
-Gagent is a small independent project. I do not have the computers or the budget of a big lab, so I built it and checked
-it with short tests on my own modest machine, and I kept it light on purpose so that it also works on weak ones. If it is
-useful to you, a star on GitHub would make me happy, and bug reports, ideas and pull requests help more than anything.
+Gagent is a small independent project by one developer. I work with a modest computer and a small budget, not with the
+hardware of a big lab, so I checked it with short tests on my own machine and kept it light on purpose, so that it also
+runs on weak ones. If it is useful to you, a star on GitHub would make me happy, and bug reports, ideas and pull requests
+help more than anything.
 
 Follow along: [Instagram](https://www.instagram.com/layer8labs8) · [YouTube](https://www.youtube.com/@layer8labs8) ·
 [TikTok](https://www.tiktok.com/@layer8labs8) · [Threads](https://www.threads.net/@layer8labs8) · [GitHub](https://github.com/layer8labs8)
