@@ -1,0 +1,12 @@
+# Keep Unix line endings for files that run inside Linux (the sandbox image,
+# shell scripts) or are embedded into the program, even on a Windows checkout.
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.ps1 text eol=crlf
+*.exe binary
+*.ico binary

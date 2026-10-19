@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use gagent::agent::{run_turn, AgentConfig, AgentEvent, TurnEnd};
+use gagent::config::CheckLevel;
 use gagent::gemini::GeminiClient;
+use gagent::llm::ModelClient;
 use gagent::sandbox::{ExecResult, ScriptedSandbox};
 use gagent::tools::ToolContext;
 use gagent::workspace::{WalkOptions, Workspace};
@@ -29,10 +31,15 @@ fn rig(results: Vec<ExecResult>) -> Rig {
     let ctx = ToolContext {
         work: Workspace::new(dir.path()).unwrap(),
         sandbox: sandbox.clone(),
-        cloud: None,
         opts: WalkOptions::default(),
         default_timeout_secs: 30,
         cancel: cancel.clone(),
+        check: CheckLevel::Off,
+        tools_note: std::sync::Arc::new(std::sync::Mutex::new(Some(String::new()))),
+        approvals: std::sync::Arc::new(gagent::permission::Approvals::new(
+            gagent::config::PermissionMode::Auto,
+        )),
+        reads: Default::default(),
     };
     Rig {
         _dir: dir,
@@ -46,12 +53,13 @@ fn cfg(max_steps: u32) -> AgentConfig {
     AgentConfig {
         model: "gemini-test".into(),
         max_steps,
+        token_budget: 0,
         system_prompt: "You are Gagent (test).".into(),
         retry_base_delay: Duration::from_millis(1),
     }
 }
 
-fn client(mock: &MockGemini) -> Arc<GeminiClient> {
+fn client(mock: &MockGemini) -> Arc<dyn ModelClient> {
     Arc::new(GeminiClient::new("TEST-KEY", &mock.base_url))
 }
 
@@ -529,4 +537,84 @@ fn sandbox_errors_are_reported_not_fatal() {
     assert_eq!(r.end, TurnEnd::Finished);
     let fr = &mock.received()[1].body["contents"][2]["parts"][0]["functionResponse"]["response"];
     assert!(fr["error"].as_str().unwrap().starts_with("Error:"));
+}
+
+#[test]
+fn a_task_stops_when_its_token_budget_is_used_up() {
+    let rig = rig(vec![]);
+    // Every scripted answer reports 110 tokens.
+    let mock = MockGemini::start(vec![
+        calls(vec![call("list_files", json!({}))]),
+        calls(vec![call("list_files", json!({"path": "."}))]),
+        calls(vec![call("list_files", json!({"depth": 1}))]),
+        text("never reached"),
+    ]);
+    let mut config = cfg(20);
+    config.token_budget = 200;
+    let mut history = Vec::new();
+    let result = run_turn(
+        &client(&mock),
+        &config,
+        &mut history,
+        "list things",
+        &rig.ctx,
+        &|_| {},
+        &rig.cancel,
+    );
+    assert_eq!(result.end, TurnEnd::TokenLimit, "{:?}", result.end);
+    assert_eq!(result.steps, 2, "stopped before the third request");
+    assert_eq!(result.usage.total_tokens, 220);
+    assert_eq!(mock.received().len(), 2);
+}
+
+#[test]
+fn the_size_of_a_request_does_not_grow_with_the_length_of_the_task() {
+    // 60 steps, each writes a 8 000 character file. Without compaction the last
+    // request would carry about 500 000 characters.
+    let rig = rig(vec![]);
+    let code = "let value = compute(1, 2, 3); // filler\n".repeat(200);
+    let mut script: Vec<Canned> = (0..60)
+        .map(|i| {
+            calls(vec![call(
+                "write_file",
+                json!({"path": format!("src/m{i}.rs"), "content": code.clone()}),
+            )])
+        })
+        .collect();
+    script.push(text("All modules written."));
+    let mock = MockGemini::start(script);
+    let mut history = Vec::new();
+    let result = run_turn(
+        &client(&mock),
+        &cfg(100),
+        &mut history,
+        "Write sixty modules",
+        &rig.ctx,
+        &|_| {},
+        &rig.cancel,
+    );
+    assert_eq!(result.end, TurnEnd::Finished, "{:?}", result.end);
+    let sizes: Vec<usize> = mock
+        .received()
+        .iter()
+        .map(|r| r.body.to_string().len())
+        .collect();
+    assert_eq!(sizes.len(), 61);
+    let biggest = *sizes.iter().max().unwrap();
+    assert!(biggest < 100_000, "largest request: {biggest} characters");
+    assert!(
+        sizes[60] < sizes[25] + 25_000,
+        "request 61 has {} characters, request 26 has {}",
+        sizes[60],
+        sizes[25]
+    );
+    // The files themselves were written in full.
+    let last = std::fs::read_to_string(rig.ctx.work.root().join("src/m59.rs")).unwrap();
+    assert_eq!(last.len(), code.len());
+    // Everything sent in total stays far below the quadratic amount.
+    let total: usize = sizes.iter().sum();
+    assert!(
+        total < 61 * 100_000,
+        "{total} characters were sent in total"
+    );
 }

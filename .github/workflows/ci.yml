@@ -7,8 +7,10 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-22.04 has the oldest C library we support; binaries built there run on newer systems too.
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +21,7 @@ jobs:
       - name: Unit and mock-server tests (Docker tests skip themselves when Docker is missing)
         run: cargo test --release
       - name: Upload the app
+        if: matrix.os != 'ubuntu-24.04'
         uses: actions/upload-artifact@v4
         with:
           name: gagent-${{ matrix.os }}

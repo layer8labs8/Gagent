@@ -54,9 +54,7 @@ pub struct Http {
 impl Http {
     /// Creates a client. `timeout` limits a whole request, including the body.
     pub fn new(timeout: Duration, max_body: u64) -> Self {
-        let tls = TlsConfig::builder()
-            .root_certs(RootCerts::PlatformVerifier)
-            .build();
+        let tls = TlsConfig::builder().root_certs(root_certs()).build();
         let config = Config::builder()
             .http_status_as_error(false)
             .timeout_global(Some(timeout))
@@ -147,6 +145,29 @@ impl Http {
             retry_after,
         })
     }
+}
+
+/// The operating system's certificate store, or the bundled Mozilla roots on a
+/// Linux system that has no certificate store at all (minimal containers, WSL
+/// images without `ca-certificates`).
+fn root_certs() -> RootCerts {
+    #[cfg(target_os = "linux")]
+    {
+        let has_store = [
+            "/etc/ssl/certs",
+            "/etc/pki/tls/certs",
+            "/etc/ssl/cert.pem",
+            "/etc/pki/ca-trust",
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
+            || std::env::var_os("SSL_CERT_FILE").is_some()
+            || std::env::var_os("SSL_CERT_DIR").is_some();
+        if !has_store {
+            return RootCerts::WebPki;
+        }
+    }
+    RootCerts::PlatformVerifier
 }
 
 fn describe_error(e: ureq::Error) -> TransportError {

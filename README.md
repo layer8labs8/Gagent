@@ -1,119 +1,195 @@
+<div align="center">
+
+<img src="assets/logo.svg" width="96" alt="Gagent logo">
+
 # Gagent
 
-Gagent is a native desktop coding agent for **Gemini**. Open a project folder, describe a task, and the
-agent reads your code, edits files, runs them in a **Docker sandbox**, reads the logs, and fixes problems
-until the code works. It runs as a normal desktop program (a single `gagent.exe` on Windows): no browser,
-no local web server.
+**A coding agent that lives on your desktop and barely touches your computer.**
 
-Gemini has no built-in "work on my folder" feature, so Gagent provides one:
+Open a folder, describe a task, and Gagent reads, edits, runs and tests your code until it works.<br>
+Gemini · NVIDIA · any OpenAI-compatible API · one small native app · no browser · no Docker needed
 
+[![CI](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml/badge.svg)](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/layer8labs8/Gagent?include_prereleases)](https://github.com/layer8labs8/Gagent/releases)
+![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+
+[Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Providers](#providers) · [Command line](#command-line) · [Build](#build-from-source)
+
+</div>
+
+<!--
+  DEMO SLOT. A screen recording goes here (for example docs/demo.gif or an mp4).
+  Left empty on purpose for now.
+-->
+
+<br>
+
+## Why Gagent
+
+- **Light.** One native program written in Rust (egui). No Electron, no browser, no local web server, no virtual machine.
+  Commands run directly on your own computer, at low priority, so a weak laptop stays cool and usable.
+- **Bring your own model.** Gemini (free tier), NVIDIA's hosted models on [build.nvidia.com](https://build.nvidia.com)
+  (free credits), or anything that speaks the OpenAI API: OpenRouter, Ollama, LM Studio, vLLM. Models without function
+  calling work too, through a text fallback.
+- **Your project is never touched while it works.** The agent edits a private copy. You review a diff, apply it, and can
+  undo the last apply.
+- **It asks first.** Installing packages, stopping programs, running downloaded scripts or touching files outside the
+  project opens a question. Truly dangerous commands are refused, always.
+- **Frugal with tokens.** Old file contents leave the conversation, long output is shortened, repeated reads of unchanged
+  files cost almost nothing, and a task stops at a token budget you choose.
+- **Your keys stay yours.** They live in a settings file on your computer and go only to the service you picked.
+
+## Quick start
+
+**Windows 10 / 11**
+
+1. Download `Gagent.exe` from the [Releases](https://github.com/layer8labs8/Gagent/releases) page.
+2. The agent runs commands with bash, which comes with [Git for Windows](https://git-scm.com). If you do not have it:
+   `winget install Git.Git` (or run `scripts\install-windows.ps1 -Install`).
+3. Start `Gagent.exe`, open **Settings**, pick a service, paste your API key, press *Test key and load models*.
+4. Choose a project folder, describe a task, review the **Changes** tab, press **Apply**.
+
+**Ubuntu / Debian**
+
+```sh
+scripts/install-ubuntu.sh --build     # window libraries, Rust, build, install to ~/.local/bin
+gagent
 ```
-your project folder                       (never touched while the agent works)
-        |  private copy
-        v
-shadow workspace  <---- file tools ----  Gemini agent loop
-        |  mounted at /workspace
-        v
-Docker sandbox (Ubuntu 24.04, no root, memory/CPU limits)  --- logs ---> back to the agent
-        |
-        v
-you review the changes and click "Apply"  (every apply is backed up and can be undone)
-```
+
+**macOS** should work (`cargo build --release`) but has not been tested yet.
+
+Get a key: [Gemini](https://aistudio.google.com/apikey) (free) · [NVIDIA](https://build.nvidia.com) (free credits, starts
+with `nvapi-`) · any OpenAI-compatible server (its address ends in `/v1`; local servers such as Ollama need no key).
+
+## What do I need to install?
+
+| | Needed? |
+|---|---|
+| An API key (or a local model server) | **Yes** |
+| Git for Windows (gives the agent bash) | **Windows only.** Linux and macOS already have bash |
+| Python, Node.js, a C compiler, ... | Only what *your project* needs. Gagent uses what is installed |
+| Docker or WSL | **No.** Optional, for people who want isolation (see below) |
+
+Gagent never installs anything silently. If the agent needs a package that is missing, it **asks you** and shows the exact
+command (*Allow*, *Always allow this kind*, *Deny*). A tool that is missing and not allowed simply fails and the agent
+tells you what it needs.
 
 ## Features
 
-- **Agent loop with tools**: list/read/write/edit/delete/search files and run shell commands. Gemini function
-  calling, retries on rate limits, stop button, long-session history compaction.
-- **Safe by design**
-  - The agent works on a private copy; your folder changes only when you apply the result.
-  - Path guard: no absolute paths, no `..`, no symlinks (a sandbox process cannot plant a link to host files).
-  - The sandbox has no capabilities, runs unprivileged, has memory/CPU/process limits, and never sees your API key.
-  - `.env` files and private keys are hidden from the agent by default.
-- **Changes tab**: per-file diff, apply selected/all, discard, undo the last apply, optional auto-apply.
-- **Sandbox tab**: Docker status, build/reset the image, network on/off, run your own commands.
-- **Google Drive** (optional): upload/download the project, back up/restore chat sessions, and let the agent use
-  Drive through tools. Uses the OAuth device flow and the narrow `drive.file` scope.
-- **Command line tool** `gagent-cli` for scripts and headless use.
+- Agent loop with tools: list, read, search, write, edit, delete files and run commands; retries on rate limits, stop
+  button, long-session history compaction, switch provider at any time.
+- **Changes tab**: per-file diff, apply selected or all, discard, undo, optional auto-apply.
+- **Quick checks** right after a file is written (Python, JavaScript, JSON syntax) so mistakes show up in the same step.
+- Sandbox tab, activity log, light and dark blue theme, drag and drop files into the workspace.
+- `gagent-cli` for scripts and headless use.
 
-## Requirements
+## How it works
 
-- A Gemini API key (free): <https://aistudio.google.com/apikey>
-- [Docker](https://docs.docker.com/get-docker/) (Docker Desktop on Windows/macOS) for running code. Without
-  Docker the agent can still read and edit files, but cannot run anything.
-- To build from source: Rust 1.89 or newer. On Linux the app needs an X11/Wayland session, OpenGL and
-  `libxkbcommon-x11`.
-
-## Build and run
-
-```sh
-cargo run --release              # desktop app
-cargo run --release --bin gagent-cli -- doctor   # check Docker + API key
+```
+your project folder                  (never touched while the agent works)
+        |  private copy
+        v
+shadow workspace  <--- file tools --- AI agent loop (Gemini / NVIDIA / OpenAI-compatible)
+        |  commands start here
+        v
+bash on your computer (or Docker / WSL)  --- logs --->  back to the agent
+        |
+        v
+you review the changes and press "Apply"   (every apply is backed up and can be undone)
 ```
 
-Windows: `cargo build --release` creates `target\release\gagent.exe`. Without installing Rust you can take the
-built `gagent.exe` from the artifacts of the **CI** workflow (GitHub: Actions tab, newest run).
+## Safety and permissions
 
-On first use Gagent builds the sandbox image `gagent-sandbox:latest` from `docker/sandbox/Dockerfile`
-(about 1 GB, a few minutes). A smaller image without Node.js and C++:
+Commands run on your own computer by default, so Gagent is careful:
 
-```sh
-docker build -t gagent-sandbox:latest --build-arg WITH_NODE=0 --build-arg WITH_CPP=0 docker/sandbox
-```
+- The agent only sees a private copy of the project. Paths are checked: no absolute paths, no `..`, no symlinks.
+  `.env` files and private keys are hidden from the agent unless you allow them.
+- Commands run at low priority with your keys and passwords removed from their environment.
+- **Three modes** (button next to the message box, or Settings):
 
-If Docker Hub is rate limited, pass a mirror: `--build-arg BASE_IMAGE=mirror.gcr.io/library/ubuntu:24.04`
-(or set `GAGENT_SANDBOX_BASE_IMAGE` for the app).
+  | Mode | Asks before |
+  |---|---|
+  | **Ask** | every command |
+  | **Auto** (default) | installing packages, stopping programs by name, running downloaded scripts, anything outside the project |
+  | **Allow all** | nothing |
 
-## Using it
+- **Always refused**, in every mode: shutting down or restarting, formatting or partitioning disks, registry edits,
+  `sudo`, `rm -rf` on the root or home folder, fork bombs, encoded PowerShell.
+- This is a seat belt, not a vault: a command on your own computer is not isolated like a container. If you run untrusted
+  projects, choose **Docker** in Settings → Sandbox for real isolation.
 
-1. Start Gagent, open **Settings**, paste your Gemini API key, press *Test key and load models*, save.
-2. Choose a project folder and start a session.
-3. Describe a task. Watch the tool calls in the chat and the **Activity** tab.
-4. Open **Changes**, review the diff, and **Apply** (or enable auto-apply).
+## Providers
 
-Command line:
+| Service | Key | Notes |
+|---|---|---|
+| Gemini | `GEMINI_API_KEY` or Settings | free tier has a daily quota |
+| NVIDIA | `NVIDIA_API_KEY` or Settings | e.g. `nvidia/nemotron-3-ultra-550b-a55b` |
+| OpenAI-compatible | `OPENAI_API_KEY` or Settings + base URL | OpenAI, OpenRouter, Ollama, LM Studio, vLLM |
+
+Text-only models (no function calling) are supported through a `<tool_call>` text fallback; *Settings → Tool mode* lets you
+force it.
+
+## Where commands run
+
+| Option | Memory | Isolated | Needs |
+|---|---|---|---|
+| **This computer** (default) | none extra | no, but guarded | bash (Git for Windows on Windows) |
+| WSL Ubuntu | VM, about 1 GB | no (reaches `/mnt/c`) | WSL |
+| Docker | Docker Desktop is heavy | **yes** | Docker |
+
+*Settings → Sandbox → Run commands in:* Automatic (this computer, otherwise Docker, otherwise WSL) · This computer ·
+Docker · WSL.
+
+## Command line
 
 ```sh
 gagent-cli run "fix the failing test" --folder ./myproject --apply
-gagent-cli models
-gagent-cli doctor --build-image
+gagent-cli run "add tests" --yes                 # do not ask before installs
+gagent-cli --provider nvidia run "add tests" --model nvidia/nemotron-3-ultra-550b-a55b
+gagent-cli --provider nvidia models
+gagent-cli doctor
 ```
 
-## Google Drive setup (optional)
+In a terminal the CLI asks the same questions as the app. Without a terminal (scripts, CI) the answer is *no* unless you
+pass `--yes`.
 
-1. In Google Cloud Console create a project and enable the **Google Drive API**.
-2. Create OAuth credentials of type **TVs and Limited Input devices**.
-3. Paste the client ID and secret in Settings, then press *Connect Google Drive* in the Drive tab and enter the
-   shown code at <https://www.google.com/device>.
+## Build from source
 
-Gagent only sees files and folders it creates itself (`drive.file` scope), inside a folder named `Gagent`.
+Rust 1.89 or newer. On Linux the window needs X11 or Wayland, OpenGL and `libxkbcommon-x11`.
+
+```sh
+cargo run --release                          # desktop app
+cargo run --release --bin gagent-cli -- doctor
+cargo test                                   # unit tests, mock model servers, real sandbox tests (skipped when unavailable)
+```
+
+Docker is optional. To use it, the first run builds the image `gagent-sandbox:latest` from `docker/sandbox/Dockerfile`.
 
 ## Data and settings
 
-Stored in the per-user data folder (`%LOCALAPPDATA%\Gagent`, `~/.local/share/Gagent`, ...), or `$GAGENT_HOME`:
-`settings.json` (private permissions), `sessions/`, `shadow/` (private project copies), `backups/`, `logs/`.
-Environment variables: `GEMINI_API_KEY`, `GAGENT_HOME`, `GAGENT_DOCKER`, `GAGENT_SANDBOX_BASE_IMAGE`,
-`GAGENT_GEMINI_BASE_URL`, `GAGENT_GOOGLE_BASE_URL` (the last two are for tests and proxies).
-
-Everything the agent reads is sent to Gemini. The sandbox has network access by default so that `pip`/`npm`
-work; turn it off in the Sandbox tab for untrusted code.
+Stored per user (`%LOCALAPPDATA%\Gagent`, `~/.local/share/Gagent`, ...) or in `$GAGENT_HOME`: `settings.json`, `sessions/`,
+`shadow/` (private project copies), `backups/`, `logs/`. API keys are saved in `settings.json` as plain text, so keep that
+folder private. Environment variables: `GEMINI_API_KEY`, `NVIDIA_API_KEY`, `OPENAI_API_KEY` (used when no key is saved),
+`GAGENT_HOME`, `GAGENT_SHELL` (use a specific bash), `GAGENT_DOCKER`, `GAGENT_SANDBOX_BASE_IMAGE`.
 
 ## Project layout
 
 ```
-src/agent.rs     agent loop (Gemini <-> tools)         src/sandbox.rs   Docker sandbox
-src/gemini.rs    Gemini REST client                    src/shadow.rs    private copy, diff, apply, undo
-src/tools.rs     tools the model can call              src/drive.rs     Google Drive client
-src/workspace.rs path guard and file walking           src/engine.rs    ties a session together
-src/gui/         egui desktop app                      src/bin/         gagent (GUI), gagent-cli
-docker/sandbox/  sandbox image                         tests/           mock Gemini/Drive + real Docker tests
+src/agent.rs       agent loop (model <-> tools)         src/policy.rs      allowed / ask / refused commands
+src/tools.rs       tools the model can call             src/permission.rs  the questions to the user
+src/host.rs        bash on this computer                src/sandbox.rs     Docker sandbox, engine choice
+src/wsl.rs         WSL sandbox                          src/shadow.rs      private copy, diff, apply, undo
+src/gemini.rs      Gemini client                        src/openai.rs      NVIDIA / OpenAI-compatible client
+src/gui/           egui desktop app                     src/bin/           gagent (GUI), gagent-cli
+tests/             mock model servers and real sandbox tests
 ```
 
-## Tests
+## Contributing
 
-```sh
-cargo test        # unit tests, mock Gemini/Drive servers, and real Docker tests (skipped without Docker)
-```
+Issues and pull requests are welcome. Please run `cargo test` first. See [TODO.md](TODO.md) for what is verified and what is
+still open.
 
 ## License
 
-MIT, see `LICENSE`.
+MIT, see [LICENSE](LICENSE).

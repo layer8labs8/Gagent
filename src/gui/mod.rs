@@ -1,7 +1,7 @@
 //! The native desktop application (egui/eframe).
 //!
 //! The UI thread only draws and reacts to input. Everything slow (copying the
-//! project, calling Gemini, running Docker, talking to Drive) happens on worker
+//! project, calling Gemini, running Docker, talking to the AI) happens on worker
 //! threads that report back through a channel of [`Msg`] values.
 
 mod markdown;
@@ -18,19 +18,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use egui::ThemePreference;
 
-use crate::config::{AppDirs, Settings, PRESET_MODELS};
-use crate::drive::DriveClient;
+use crate::config::{AppDirs, Settings};
+use crate::permission::Approvals;
 use crate::sandbox::DockerStatus;
 use crate::session::{Session, SessionMeta, SessionStore};
 
 pub use state::*;
 
 /// Starts the desktop app and blocks until the window is closed.
+/// Maps the setting to egui's theme choice.
+fn preference(appearance: crate::config::Appearance) -> ThemePreference {
+    match appearance {
+        crate::config::Appearance::Auto => ThemePreference::System,
+        crate::config::Appearance::Light => ThemePreference::Light,
+        crate::config::Appearance::Dark => ThemePreference::Dark,
+    }
+}
+
 pub fn run(dirs: AppDirs) -> eframe::Result {
     crate::engine::install_crash_log(&dirs);
     // Held until the window closes; see `claim_instance`.
     let _instance = crate::engine::claim_instance(&dirs);
+    let appearance = Settings::load(&dirs).appearance;
     let icon = egui::IconData {
         rgba: theme::icon_rgba(128),
         width: 128,
@@ -48,7 +59,8 @@ pub fn run(dirs: AppDirs) -> eframe::Result {
         crate::APP_NAME,
         options,
         Box::new(move |cc| {
-            theme::apply(&cc.egui_ctx);
+            theme::install_fonts(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx, preference(appearance));
             Ok(Box::new(GagentApp::new(dirs, cc.egui_ctx.clone())))
         }),
     )
@@ -89,11 +101,12 @@ pub struct GagentApp {
     pub(crate) models_loading: bool,
     pub(crate) key_status: Option<(bool, String)>,
     pub(crate) show_key: bool,
-    pub(crate) drive: DriveState,
     pub(crate) banner: Option<Banner>,
     pub(crate) new_project_path: String,
     pub(crate) confirm_delete: Option<String>,
     started_engines: HashSet<String>,
+    /// The questions of the agent ("may I install this?") wait here for the user.
+    pub(crate) approvals: Arc<Approvals>,
 }
 
 impl GagentApp {
@@ -102,6 +115,17 @@ impl GagentApp {
         let settings = Settings::load(&dirs);
         let store = SessionStore::new(&dirs.sessions_dir());
         let (tx, rx) = mpsc::channel();
+        let approvals = Arc::new(Approvals::new(settings.permission));
+        {
+            let ctx = ctx.clone();
+            approvals.set_wake(move || {
+                ctx.request_repaint();
+                // Blinks the taskbar button when the window is not in front.
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Informational,
+                ));
+            });
+        }
         let mut app = GagentApp {
             sessions: store.list(),
             store,
@@ -110,27 +134,26 @@ impl GagentApp {
             current: None,
             notify: Notifier { tx, ctx },
             rx,
-            tab: Tab::Activity,
-            right_open: true,
+            tab: Tab::Changes,
+            right_open: false,
             docker: None,
             docker_checking: false,
             building_image: false,
             sandbox_log: Vec::new(),
-            models: PRESET_MODELS.iter().map(|s| s.to_string()).collect(),
+            models: settings.preset_models(),
             models_loading: false,
             key_status: None,
             show_key: false,
-            drive: DriveState::default(),
             banner: None,
             new_project_path: settings.last_project.clone(),
             confirm_delete: None,
             started_engines: HashSet::new(),
+            approvals,
             settings,
             dirs,
         };
-        app.rebuild_drive_client();
         app.check_docker();
-        if !app.settings.effective_api_key().is_empty() {
+        if app.settings.is_configured() {
             app.load_models();
         }
         app
@@ -159,19 +182,6 @@ impl GagentApp {
         self.settings.normalize();
         if let Err(e) = self.settings.save(&self.dirs) {
             self.show_banner(format!("Could not save settings: {e:#}"), true);
-        }
-    }
-
-    pub(crate) fn rebuild_drive_client(&mut self) {
-        self.drive.client =
-            if self.settings.drive.is_connected() && self.settings.drive.has_client() {
-                DriveClient::new(&self.settings.drive).ok().map(Arc::new)
-            } else {
-                None
-            };
-        if self.drive.client.is_none() {
-            self.drive.account = None;
-            self.drive.entries.clear();
         }
     }
 
@@ -276,10 +286,7 @@ impl GagentApp {
             self.settings.clone(),
             id.to_string(),
             project,
-            self.drive
-                .client
-                .clone()
-                .map(|c| c as Arc<dyn crate::drive::CloudStore>),
+            self.approvals.clone(),
         );
     }
 
@@ -288,7 +295,7 @@ impl GagentApp {
             return;
         }
         self.docker_checking = true;
-        worker::check_docker(self.notify.clone(), self.settings.sandbox.image.clone());
+        worker::check_docker(self.notify.clone(), self.settings.sandbox.clone());
     }
 
     pub(crate) fn load_models(&mut self) {
@@ -318,8 +325,8 @@ impl GagentApp {
         if typed.is_empty() {
             return;
         }
-        if settings.effective_api_key().is_empty() {
-            self.show_banner("Add your Gemini API key in Settings first.", true);
+        if !settings.is_configured() {
+            self.show_banner(settings.setup_hint(), true);
             self.draft = Some(self.settings.clone());
             return;
         }
@@ -474,13 +481,22 @@ impl GagentApp {
 
     /// Applies edited settings and rebuilds engines so they pick the changes up.
     pub(crate) fn commit_settings(&mut self, new: Settings) {
-        let key_changed = new.effective_api_key() != self.settings.effective_api_key();
-        let drive_changed = new.drive != self.settings.drive;
-        let image_changed = new.sandbox.image != self.settings.sandbox.image;
+        let provider_changed = new.provider != self.settings.provider;
+        let key_changed = provider_changed
+            || new.effective_api_key() != self.settings.effective_api_key()
+            || new.api_base_url() != self.settings.api_base_url();
+        let appearance_changed = new.appearance != self.settings.appearance;
+        let image_changed = new.sandbox.image != self.settings.sandbox.image
+            || new.sandbox.backend != self.settings.sandbox.backend
+            || new.sandbox.wsl_distro != self.settings.sandbox.wsl_distro;
         self.settings = new;
+        self.approvals.set_mode(self.settings.permission);
+        if provider_changed {
+            self.models = self.settings.preset_models();
+        }
         self.save_settings();
-        if drive_changed {
-            self.rebuild_drive_client();
+        if appearance_changed {
+            theme::apply(&self.notify.ctx, preference(self.settings.appearance));
         }
         for a in self.open.values_mut() {
             a.engine_dirty = true;
@@ -488,7 +504,7 @@ impl GagentApp {
         self.refresh_engines_if_idle();
         if key_changed {
             self.key_status = None;
-            if !self.settings.effective_api_key().is_empty() {
+            if self.settings.is_configured() {
                 self.load_models();
             }
         }
@@ -567,6 +583,13 @@ impl GagentApp {
                                         "Reached the step limit ({n}). Send \"continue\" to let the agent go on."
                                     )));
                                     a.log_info("Step limit reached");
+                                }
+                                TurnEnd::TokenLimit => {
+                                    let n = self.settings.max_task_tokens;
+                                    a.session.items.push(crate::session::ChatItem::Notice(format!(
+                                        "Reached the token budget ({n} tokens). Send \"continue\" to let the agent go on, or raise the budget in Settings."
+                                    )));
+                                    a.log_info("Token budget reached");
                                 }
                                 TurnEnd::Failed(msg) => {
                                     a.log_error(&msg);
@@ -703,54 +726,6 @@ impl GagentApp {
                 }
                 self.refresh_changes_for(&session);
             }
-            Msg::DriveCode(code) => {
-                if let Some(c) = self.drive.connecting.as_mut() {
-                    c.code = Some(code);
-                }
-            }
-            Msg::DriveConnected(result) => {
-                self.drive.connecting = None;
-                match result {
-                    Ok(refresh) => {
-                        self.settings.drive.refresh_token = refresh;
-                        self.save_settings();
-                        self.rebuild_drive_client();
-                        for a in self.open.values_mut() {
-                            a.engine_dirty = true;
-                        }
-                        self.refresh_engines_if_idle();
-                        self.show_banner("Google Drive connected.", false);
-                        self.drive_refresh();
-                    }
-                    Err(e) => self.show_banner(format!("Drive connection failed: {e}"), true),
-                }
-            }
-            Msg::DriveAccount(name) => self.drive.account = name,
-            Msg::DriveEntries { dir, result } => {
-                self.drive.loading = false;
-                match result {
-                    Ok(list) => {
-                        self.drive.cwd = dir;
-                        self.drive.entries = list;
-                        self.drive.error = None;
-                    }
-                    Err(e) => self.drive.error = Some(e),
-                }
-            }
-            Msg::DriveProgress(line) => self.drive.job_status = line,
-            Msg::DriveJob { label, result } => {
-                self.drive.job = None;
-                self.drive.last_result = Some(match result {
-                    Ok(text) => (true, format!("{label}: {text}")),
-                    Err(e) => (false, format!("{label} failed: {e}")),
-                });
-                self.sessions = self.store.list();
-                self.drive_list_current();
-                let ids: Vec<String> = self.open.keys().cloned().collect();
-                for id in ids {
-                    self.refresh_changes_for(&id);
-                }
-            }
             Msg::Info(text) => self.show_banner(text, false),
         }
     }
@@ -854,9 +829,6 @@ impl GagentApp {
             .any(|a| a.run.is_some() || a.changes_dirty_at.is_some() || a.terminal.busy)
             || self.docker_checking
             || self.building_image
-            || self.drive.connecting.is_some()
-            || self.drive.job.is_some()
-            || self.drive.loading
             || self.models_loading
             || self.banner.is_some();
         if busy {
@@ -864,94 +836,6 @@ impl GagentApp {
                 .ctx
                 .request_repaint_after(Duration::from_millis(120));
         }
-    }
-
-    // ----- Drive actions ---------------------------------------------------
-
-    pub(crate) fn drive_refresh(&mut self) {
-        let Some(client) = self.drive.client.clone() else {
-            return;
-        };
-        worker::drive_account(self.notify.clone(), client);
-        self.drive_list("");
-    }
-
-    pub(crate) fn drive_list_current(&mut self) {
-        let dir = self.drive.cwd.clone();
-        self.drive_list(&dir);
-    }
-
-    pub(crate) fn drive_list(&mut self, dir: &str) {
-        let Some(client) = self.drive.client.clone() else {
-            return;
-        };
-        self.drive.loading = true;
-        worker::drive_list(self.notify.clone(), client, dir.to_string());
-    }
-
-    pub(crate) fn drive_connect(&mut self) {
-        if !self.settings.drive.has_client() {
-            self.show_banner(
-                "Enter the Google client ID and secret in Settings first.",
-                true,
-            );
-            self.draft = Some(self.settings.clone());
-            return;
-        }
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.drive.connecting = Some(ConnectState {
-            code: None,
-            cancel: cancel.clone(),
-        });
-        worker::drive_connect(self.notify.clone(), self.settings.drive.clone(), cancel);
-    }
-
-    pub(crate) fn drive_disconnect(&mut self) {
-        self.settings.drive.refresh_token.clear();
-        self.save_settings();
-        self.rebuild_drive_client();
-        for a in self.open.values_mut() {
-            a.engine_dirty = true;
-        }
-        self.refresh_engines_if_idle();
-        self.drive.last_result = None;
-    }
-
-    pub(crate) fn drive_job(&mut self, kind: DriveJobKind) {
-        let Some(client) = self.drive.client.clone() else {
-            return;
-        };
-        if self.drive.job.is_some() {
-            return;
-        }
-        let (project, work_dir, label) = match self.active() {
-            Some(a) => {
-                let work = match &a.engine {
-                    EngineState::Ready(e) => Some(e.work_dir()),
-                    _ => None,
-                };
-                (a.session.meta.project.clone(), work, kind.label())
-            }
-            None => (String::new(), None, kind.label()),
-        };
-        if kind.needs_project() && (project.is_empty() || work_dir.is_none()) {
-            self.show_banner("Open a project session first.", true);
-            return;
-        }
-        self.drive.job = Some(label.to_string());
-        self.drive.job_status.clear();
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.drive.job_cancel = cancel.clone();
-        worker::drive_job(
-            self.notify.clone(),
-            client,
-            kind,
-            project,
-            work_dir,
-            self.dirs.sessions_dir(),
-            crate::engine::walk_options(&self.settings),
-            cancel,
-        );
     }
 
     /// Called when the window closes: stops every sandbox container.
@@ -992,6 +876,7 @@ pub fn apply_summary(report: &crate::shadow::ApplyReport) -> String {
 
 impl eframe::App for GagentApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        theme::sync(ui.ctx());
         self.drain_messages();
         self.tick();
         self.handle_dropped_files(ui.ctx());
@@ -1001,7 +886,7 @@ impl eframe::App for GagentApp {
             panels::side_panel(self, ui);
         }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(theme::BG))
+            .frame(egui::Frame::new().fill(theme::bg()))
             .show(ui, |ui| {
                 if self.current.is_some() {
                     views::chat(self, ui);
@@ -1011,6 +896,7 @@ impl eframe::App for GagentApp {
             });
         panels::settings_window(self, ui.ctx());
         views::banner(self, ui.ctx());
+        views::approval_card(self, ui.ctx());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

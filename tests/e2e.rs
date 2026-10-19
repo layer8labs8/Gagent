@@ -1,5 +1,6 @@
-//! Full pipeline: project folder -> shadow copy -> scripted Gemini -> real Docker sandbox
-//! -> apply to the project -> undo. Skipped when Docker is not available.
+//! Full pipeline: project folder -> shadow copy -> scripted Gemini -> real sandbox
+//! (Docker, and WSL on Windows) -> apply to the project -> undo.
+//! Each variant is skipped when its sandbox is not available.
 
 mod support;
 
@@ -8,7 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use gagent::agent::{AgentEvent, TurnEnd};
-use gagent::config::{AppDirs, Settings};
+use gagent::config::{AppDirs, SandboxBackend, Settings};
 use gagent::engine::Engine;
 use gagent::shadow::ChangeKind;
 use serde_json::json;
@@ -17,11 +18,49 @@ use support::*;
 const BUGGY: &str =
     "def average(values):\n    return sum(values) / len(values)\n\nprint(average([]))\n";
 
+/// The tests share one environment variable (the fake Gemini address).
+static SERIAL: Mutex<()> = Mutex::new(());
+
 #[test]
-fn agent_fixes_a_project_in_the_sandbox_and_user_applies_the_result() {
+fn agent_fixes_a_project_in_docker_and_user_applies_the_result() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     if !docker_ready() {
         return;
     }
+    pipeline(SandboxBackend::Docker, "Ubuntu 24.04 sandbox");
+}
+
+#[test]
+fn agent_fixes_a_project_in_wsl_and_user_applies_the_result() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    if !matches!(
+        gagent::wsl::wsl_status(""),
+        Ok(gagent::sandbox::DockerStatus::Wsl { python: true, .. })
+    ) {
+        eprintln!("SKIPPED: WSL with Python is not available");
+        return;
+    }
+    pipeline(SandboxBackend::Wsl, "(WSL)");
+}
+
+#[test]
+fn agent_fixes_a_project_on_this_computer_and_user_applies_the_result() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let python = ["python3", "python"].iter().any(|p| {
+        std::process::Command::new(p)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
+    if gagent::host::find_shell().is_none() || !python {
+        eprintln!("SKIPPED: bash and Python are needed on this computer");
+        return;
+    }
+    pipeline(SandboxBackend::Host, "directly on the user's own computer");
+}
+
+fn pipeline(backend: SandboxBackend, prompt_marker: &str) {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     fs::write(project.path().join("calc.py"), BUGGY).unwrap();
@@ -57,13 +96,15 @@ fn agent_fixes_a_project_in_the_sandbox_and_user_applies_the_result() {
     let dirs = AppDirs::at(home.path());
     let mut settings = Settings::default();
     settings.api_key = "E2E-KEY".into();
+    settings.sandbox.backend = backend;
+    // The test checks the pending changes before applying them itself.
+    settings.auto_apply = false;
     let engine = Engine::open(
         &dirs,
         &settings,
         project.path(),
         "e2e-session",
         Arc::new(|l| eprintln!("  [sandbox] {l}")),
-        None,
     )
     .unwrap();
 
@@ -103,7 +144,7 @@ fn agent_fixes_a_project_in_the_sandbox_and_user_applies_the_result() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(system.contains("Ubuntu 24.04 sandbox"), "{system}");
+    assert!(system.contains(prompt_marker), "{system}");
     assert!(system.contains("calc.py"));
     assert!(!system.contains(".env"));
 

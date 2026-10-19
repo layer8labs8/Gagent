@@ -1,4 +1,4 @@
-//! The agent loop: ask Gemini, run the tools it requests, feed the results
+//! The agent loop: ask the model, run the tools it requests, feed the results
 //! back, and repeat until the model gives a final answer.
 
 use std::collections::HashMap;
@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::gemini::{ApiError, FunctionCall, GeminiClient, ModelReply, Usage};
+use crate::gemini::{ApiError, FunctionCall, ModelReply, Usage};
+use crate::llm::ModelClient;
 use crate::tools::{self, ToolContext};
 use crate::util::{sha256_hex, truncate_end};
 
@@ -17,10 +18,16 @@ use crate::util::{sha256_hex, truncate_end};
 const MAX_RETRIES: u32 = 4;
 /// How many times an empty model answer is re-requested.
 const MAX_EMPTY_REPLIES: u32 = 2;
-/// Old tool output is shortened once the history grows beyond this many characters.
-const COMPACT_THRESHOLD_CHARS: usize = 350_000;
+/// Old messages are shortened once the history grows beyond this many characters
+/// (about 15 000 tokens). Every step sends the whole history again, so a long
+/// history is paid for at every single step.
+const COMPACT_THRESHOLD_CHARS: usize = 60_000;
 /// The newest messages are never shortened.
-const KEEP_RECENT_MESSAGES: usize = 10;
+const KEEP_RECENT_MESSAGES: usize = 8;
+/// Text arguments of old tool calls (file contents) longer than this are replaced.
+const MAX_OLD_ARG_CHARS: usize = 300;
+/// Old answers of the model longer than this are cut.
+const MAX_OLD_TEXT_CHARS: usize = 1500;
 /// Hard stop for runaway repetition.
 const MAX_IDENTICAL_REPEATS: u32 = 5;
 
@@ -56,6 +63,8 @@ pub enum TurnEnd {
     Cancelled,
     /// The model used up its step budget without finishing.
     StepLimit,
+    /// The task used up its token budget (all requests of the task added up).
+    TokenLimit,
     Failed(String),
 }
 
@@ -71,6 +80,8 @@ pub struct TurnResult {
 pub struct AgentConfig {
     pub model: String,
     pub max_steps: u32,
+    /// Stop when the task has used this many tokens; 0 means no limit.
+    pub token_budget: u64,
     pub system_prompt: String,
     /// Wait before the first retry; doubles each time.
     pub retry_base_delay: Duration,
@@ -86,7 +97,7 @@ enum CallError {
 /// `history` holds the raw Gemini conversation and is extended in place, so a
 /// later call continues the same conversation.
 pub fn run_turn(
-    client: &Arc<GeminiClient>,
+    client: &Arc<dyn ModelClient>,
     cfg: &AgentConfig,
     history: &mut Vec<Value>,
     user_text: &str,
@@ -96,7 +107,7 @@ pub fn run_turn(
 ) -> TurnResult {
     history.push(json!({ "role": "user", "parts": [ { "text": user_text } ] }));
 
-    let declarations = tools::declarations(ctx.cloud.is_some());
+    let declarations = tools::declarations();
     let mut usage = Usage::default();
     let mut steps = 0;
     let mut final_text = String::new();
@@ -117,6 +128,9 @@ pub fn run_turn(
         }
         if steps >= cfg.max_steps {
             return finish(TurnEnd::StepLimit, final_text, usage, steps);
+        }
+        if cfg.token_budget > 0 && usage.total_tokens >= cfg.token_budget {
+            return finish(TurnEnd::TokenLimit, final_text, usage, steps);
         }
         steps += 1;
 
@@ -236,7 +250,7 @@ fn function_response(call: &FunctionCall, ok: bool, text: &str) -> Value {
 
 /// Calls the API without blocking cancellation, retrying temporary failures.
 fn call_model(
-    client: &Arc<GeminiClient>,
+    client: &Arc<dyn ModelClient>,
     cfg: &AgentConfig,
     history: &[Value],
     declarations: &Value,
@@ -303,7 +317,30 @@ fn call_model(
     }
 }
 
-/// Shortens old tool output so long sessions stay within the context window.
+/// Arguments of file tools that hold whole file contents.
+const CONTENT_ARGS: &[(&str, &[&str])] = &[
+    ("write_file", &["content", "contents", "text", "file_text"]),
+    (
+        "edit_file",
+        &[
+            "old_text",
+            "old_string",
+            "old",
+            "new_text",
+            "new_string",
+            "new",
+        ],
+    ),
+];
+
+/// Shortens old messages so long sessions stay cheap and within the context window.
+///
+/// What is removed is also on disk or no longer needed:
+/// * the contents of old `write_file` / `edit_file` calls (the files exist),
+/// * old tool output (it was already read),
+/// * the middle of very long old answers.
+///
+/// The newest messages and all user messages are left alone.
 pub fn compact_history(history: &mut [Value]) {
     let size: usize = history.iter().map(|m| m.to_string().len()).sum();
     if size < COMPACT_THRESHOLD_CHARS || history.len() <= KEEP_RECENT_MESSAGES {
@@ -311,26 +348,64 @@ pub fn compact_history(history: &mut [Value]) {
     }
     let limit = history.len() - KEEP_RECENT_MESSAGES;
     for message in history.iter_mut().take(limit) {
+        let is_model = message["role"] == "model";
         let Some(parts) = message["parts"].as_array_mut() else {
             continue;
         };
         for part in parts {
-            let Some(response) = part
+            if let Some(response) = part
                 .get_mut("functionResponse")
                 .and_then(|f| f.get_mut("response"))
-            else {
-                continue;
-            };
-            for key in ["output", "error"] {
-                if let Some(text) = response.get(key).and_then(Value::as_str) {
-                    if text.chars().count() > 600 {
-                        let short = format!(
-                            "{} [older output removed to save space]",
-                            truncate_end(text, 400)
-                        );
-                        response[key] = json!(short);
+            {
+                for key in ["output", "error"] {
+                    if let Some(text) = response.get(key).and_then(Value::as_str) {
+                        if text.chars().count() > 600 {
+                            let short = format!(
+                                "{} [older output removed to save space]",
+                                truncate_end(text, 400)
+                            );
+                            response[key] = json!(short);
+                        }
                     }
                 }
+            }
+            if let Some(call) = part.get_mut("functionCall") {
+                shrink_call(call);
+            }
+            if is_model {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    if text.chars().count() > MAX_OLD_TEXT_CHARS {
+                        let short = format!(
+                            "{} [rest of this older answer removed to save space]",
+                            truncate_end(text, 600)
+                        );
+                        part["text"] = json!(short);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Replaces long file contents in the arguments of an old tool call.
+fn shrink_call(call: &mut Value) {
+    let name = call["name"].as_str().unwrap_or_default().to_string();
+    let Some((_, keys)) = CONTENT_ARGS.iter().find(|(n, _)| *n == name) else {
+        return;
+    };
+    let Some(args) = call.get_mut("args").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for key in *keys {
+        if let Some(text) = args.get(*key).and_then(Value::as_str) {
+            let count = text.chars().count();
+            if count > MAX_OLD_ARG_CHARS {
+                args.insert(
+                    (*key).to_string(),
+                    json!(format!(
+                        "[omitted: {count} characters; the file on disk has them]"
+                    )),
+                );
             }
         }
     }
@@ -363,6 +438,69 @@ mod tests {
             before,
             "recent output stays intact"
         );
+    }
+
+    fn big_history() -> Vec<Value> {
+        let code = "fn line() { /* ... */ }\n".repeat(400); // about 9 000 characters
+        let mut history = vec![json!({"role":"user","parts":[{"text":"Build me an editor"}]})];
+        for i in 0..12 {
+            history.push(json!({"role":"model","parts":[
+                {"text": format!("Writing module {i}.")},
+                {"functionCall":{"id":"x","name":"write_file","args":{"path":format!("src/m{i}.rs"),"content":code.clone()}}}
+            ]}));
+            history.push(json!({"role":"user","parts":[{"functionResponse":{"name":"write_file","response":{"output":format!("Created src/m{i}.rs")}}}]}));
+        }
+        history
+    }
+
+    #[test]
+    fn old_file_contents_leave_the_history() {
+        let mut history = big_history();
+        let before: usize = history.iter().map(|m| m.to_string().len()).sum();
+        compact_history(&mut history);
+        let after: usize = history.iter().map(|m| m.to_string().len()).sum();
+        assert!(after * 2 < before, "{before} -> {after} characters");
+
+        // An old write keeps its path and a short placeholder instead of the code.
+        let old = &history[1]["parts"][1]["functionCall"]["args"];
+        assert_eq!(old["path"], "src/m0.rs");
+        let content = old["content"].as_str().unwrap();
+        assert!(
+            content.starts_with("[omitted: 9600 characters"),
+            "{content}"
+        );
+        // The newest calls keep their full content.
+        let last_call = history[history.len() - 2]["parts"][1]["functionCall"]["args"]["content"]
+            .as_str()
+            .unwrap();
+        assert!(last_call.contains("fn line()"));
+        // The user's first message is never touched.
+        assert_eq!(history[0]["parts"][0]["text"], "Build me an editor");
+        // Compacting again changes nothing.
+        let once = history.clone();
+        compact_history(&mut history);
+        assert_eq!(history, once);
+    }
+
+    #[test]
+    fn short_arguments_and_small_histories_stay() {
+        let mut history = big_history();
+        history.insert(
+            1,
+            json!({"role":"model","parts":[{"functionCall":{"name":"edit_file","args":{"path":"a.rs","old_text":"x = 1","new_text":"x = 2"}}}]}),
+        );
+        compact_history(&mut history);
+        let args = &history[1]["parts"][0]["functionCall"]["args"];
+        assert_eq!(args["old_text"], "x = 1");
+        assert_eq!(args["new_text"], "x = 2");
+
+        let mut small = vec![
+            json!({"role":"user","parts":[{"text":"hi"}]}),
+            json!({"role":"model","parts":[{"functionCall":{"name":"write_file","args":{"path":"a","content":"c".repeat(2000)}}}]}),
+        ];
+        let copy = small.clone();
+        compact_history(&mut small);
+        assert_eq!(small, copy);
     }
 
     #[test]

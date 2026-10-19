@@ -11,7 +11,7 @@ use std::time::Duration;
 use regex::RegexBuilder;
 use serde_json::{json, Value};
 
-use crate::drive::CloudStore;
+use crate::config::CheckLevel;
 use crate::sandbox::{ExecRequest, Sandbox};
 use crate::util::{human_bytes, looks_binary, truncate_end, truncate_middle, write_atomic};
 use crate::workspace::{normalize_rel, walk_files, WalkOptions, Workspace};
@@ -20,20 +20,135 @@ use crate::workspace::{normalize_rel, walk_files, WalkOptions, Workspace};
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 /// Files larger than this must be read in line ranges.
 const MAX_FULL_READ_BYTES: u64 = 256 * 1024;
-const DEFAULT_READ_LINES: usize = 2000;
+/// One `read_file` call returns at most this many lines. Every line is sent to the model
+/// again at every later step, so big reads are expensive; the model can ask for more.
+const DEFAULT_READ_LINES: usize = 500;
 const MAX_LIST_LINES: usize = 400;
-const MAX_SEARCH_RESULTS: usize = 100;
+const MAX_SEARCH_RESULTS: usize = 60;
+/// A repeated read of an unchanged file part is answered with a short note only if the
+/// first read is at most this many tool calls old (so it is still in the conversation
+/// and has not been shortened by the history compaction).
+const REREAD_WINDOW: u64 = 6;
 /// Longest command output returned to the model, in characters.
-const MAX_COMMAND_OUTPUT_CHARS: usize = 24_000;
+const MAX_COMMAND_OUTPUT_CHARS: usize = 12_000;
 
 /// Everything a tool needs to do its work.
 pub struct ToolContext {
     pub work: Workspace,
     pub sandbox: Arc<dyn Sandbox>,
-    pub cloud: Option<Arc<dyn CloudStore>>,
     pub opts: WalkOptions,
     pub default_timeout_secs: u32,
     pub cancel: Arc<AtomicBool>,
+    /// Quick checks run right after a file was written.
+    pub check: CheckLevel,
+    /// What the sandbox has installed. Filled by the first `run_command` of a session
+    /// (so a chat without commands never starts the sandbox just to look).
+    pub tools_note: Arc<std::sync::Mutex<Option<String>>>,
+    /// Decides whether a command may run, asking the user when it has to.
+    pub approvals: Arc<crate::permission::Approvals>,
+    /// Which parts of which files were read lately (to answer a pointless re-read cheaply).
+    pub reads: std::sync::Mutex<ReadLog>,
+}
+
+/// Remembers recent `read_file` results of one task.
+#[derive(Default)]
+pub struct ReadLog {
+    /// Number of tool calls so far.
+    calls: u64,
+    seen: Vec<SeenRead>,
+}
+
+struct SeenRead {
+    rel: String,
+    first: usize,
+    last: usize,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    at: u64,
+}
+
+impl ReadLog {
+    /// Counts one more tool call.
+    fn tick(&mut self) {
+        self.calls += 1;
+    }
+
+    /// How many calls ago the same, unchanged part of the file was read; `None` when
+    /// it has to be read (again).
+    fn recent_read(
+        &self,
+        rel: &str,
+        first: usize,
+        last: usize,
+        meta: &std::fs::Metadata,
+    ) -> Option<u64> {
+        let modified = meta.modified().ok();
+        self.seen
+            .iter()
+            .rev()
+            .find(|r| {
+                r.rel == rel
+                    && r.first <= first
+                    && r.last >= last
+                    && r.len == meta.len()
+                    && r.modified == modified
+                    && self.calls.saturating_sub(r.at) <= REREAD_WINDOW
+            })
+            .map(|r| self.calls - r.at)
+    }
+
+    fn remember(&mut self, rel: &str, first: usize, last: usize, meta: &std::fs::Metadata) {
+        self.seen.retain(|r| r.rel != rel);
+        self.seen.push(SeenRead {
+            rel: rel.to_string(),
+            first,
+            last,
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            at: self.calls,
+        });
+        if self.seen.len() > 32 {
+            self.seen.remove(0);
+        }
+    }
+}
+
+/// A bash snippet that lists the installed tools, one short line each.
+pub const TOOL_PROBE: &str = r#"printf 'tools: '; for t in python3 pip3 node npm cargo rustc cc gcc make git curl unzip; do command -v $t >/dev/null 2>&1 && printf '%s ' $t; done; echo; v=$(python3 --version 2>&1) && echo "python: $v"; v=$(node --version 2>&1) && echo "node: $v"; v=$(cargo --version 2>&1) && echo "cargo: $v"; v=$(rustup target list --installed 2>/dev/null | tr '\n' ' ') && [ -n "$v" ] && echo "rust targets: $v""#;
+
+/// Turns the output of [`TOOL_PROBE`] into one short line for the model.
+pub fn summarize_probe(output: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for line in output.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if line.contains("not found") {
+            continue;
+        }
+        match line.strip_prefix("tools:") {
+            Some(rest) if rest.trim().is_empty() => parts.push("no common tools".into()),
+            Some(rest) => parts.push(rest.trim().to_string()),
+            None => parts.push(line.to_string()),
+        }
+    }
+    truncate_end(&parts.join("; "), 400)
+}
+
+/// Looks at the sandbox once per session. Returns the note when this call did the looking.
+fn probe_sandbox_once(ctx: &ToolContext) -> Option<String> {
+    let mut slot = ctx.tools_note.lock().unwrap_or_else(|p| p.into_inner());
+    if slot.is_some() {
+        return None;
+    }
+    let req = ExecRequest {
+        command: TOOL_PROBE.to_string(),
+        cwd: String::new(),
+        timeout_secs: 30,
+    };
+    let note = match ctx.sandbox.exec(&req, &ctx.cancel) {
+        Ok(r) if r.exit_code.is_some() => summarize_probe(&r.output),
+        _ => String::new(),
+    };
+    *slot = Some(note.clone());
+    Some(note)
 }
 
 /// What a tool call produced.
@@ -72,130 +187,99 @@ impl ToolOutput {
 
 type ToolResult = Result<ToolOutput, String>;
 
-/// Function declarations sent to Gemini.
-pub fn declarations(cloud_enabled: bool) -> Value {
-    let mut tools = vec![
+/// Function declarations sent to the model. They are sent with every request, so the
+/// descriptions are kept short.
+pub fn declarations() -> Value {
+    let path = |what: &str| json!({"type": "STRING", "description": what});
+    let tools = vec![
         json!({
             "name": "list_files",
-            "description": "List files in the workspace as a flat list of relative paths. Hidden build and dependency folders (node_modules, target, .git, ...) are not shown.",
+            "description": "List files as relative paths (build and dependency folders are hidden).",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "Folder to list, relative to the workspace root. Default: the root."},
-                    "depth": {"type": "INTEGER", "description": "How many folder levels to show below `path` (1-6). Default 2."}
+                    "path": path("Folder, default: the root."),
+                    "depth": {"type": "INTEGER", "description": "Levels below path (1-6), default 2."}
                 }
             }
         }),
         json!({
             "name": "read_file",
-            "description": "Read a text file. Lines are returned with line numbers (`  12 | code`); the numbers are not part of the file. Use start_line/end_line for large files.",
+            "description": "Read a text file. Lines come numbered (`  12 | code`); the numbers are not part of the file. Returns at most 500 lines: use start_line/end_line for more.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "File path relative to the workspace root."},
-                    "start_line": {"type": "INTEGER", "description": "First line to return (1-based)."},
-                    "end_line": {"type": "INTEGER", "description": "Last line to return (inclusive)."}
+                    "path": path("File path."),
+                    "start_line": {"type": "INTEGER", "description": "First line (1-based)."},
+                    "end_line": {"type": "INTEGER", "description": "Last line (inclusive)."}
                 },
                 "required": ["path"]
             }
         }),
         json!({
             "name": "write_file",
-            "description": "Create a file or completely replace its contents. Parent folders are created automatically. For small changes to an existing file use edit_file instead.",
+            "description": "Create a file or replace it completely (parent folders are created). Use edit_file for small changes.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "File path relative to the workspace root."},
-                    "content": {"type": "STRING", "description": "The complete new contents of the file."}
+                    "path": path("File path."),
+                    "content": path("The complete new contents.")
                 },
                 "required": ["path", "content"]
             }
         }),
         json!({
             "name": "edit_file",
-            "description": "Replace text in an existing file. `old_text` must match the file exactly, including whitespace and indentation, and must be unique unless replace_all is true. Include enough surrounding lines to make it unique.",
+            "description": "Replace text in an existing file. old_text must match exactly (indentation included) and be unique unless replace_all is true.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "path": {"type": "STRING", "description": "File path relative to the workspace root."},
-                    "old_text": {"type": "STRING", "description": "The exact text to replace (without line numbers)."},
-                    "new_text": {"type": "STRING", "description": "The replacement text."},
-                    "replace_all": {"type": "BOOLEAN", "description": "Replace every occurrence instead of requiring a unique match."}
+                    "path": path("File path."),
+                    "old_text": path("Exact text to replace (no line numbers)."),
+                    "new_text": path("Replacement text."),
+                    "replace_all": {"type": "BOOLEAN", "description": "Replace every occurrence."}
                 },
                 "required": ["path", "old_text", "new_text"]
             }
         }),
         json!({
             "name": "delete_file",
-            "description": "Delete a file from the workspace.",
+            "description": "Delete a file.",
             "parameters": {
                 "type": "OBJECT",
-                "properties": { "path": {"type": "STRING", "description": "File path relative to the workspace root."} },
+                "properties": { "path": path("File path.") },
                 "required": ["path"]
             }
         }),
         json!({
             "name": "search_files",
-            "description": "Search file contents with a regular expression. Returns `path:line: text` matches.",
+            "description": "Regex search in file contents. Returns `path:line: text`.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "pattern": {"type": "STRING", "description": "Regular expression (Rust regex syntax)."},
-                    "path": {"type": "STRING", "description": "Folder to search in. Default: the whole workspace."},
-                    "glob": {"type": "STRING", "description": "Only search files matching this glob, e.g. `*.py`."},
-                    "ignore_case": {"type": "BOOLEAN", "description": "Case-insensitive search."}
+                    "pattern": path("Regular expression (Rust syntax)."),
+                    "path": path("Folder, default: everything."),
+                    "glob": path("Only files matching this glob, e.g. `*.py`."),
+                    "ignore_case": {"type": "BOOLEAN", "description": "Case-insensitive."},
+                    "files_only": {"type": "BOOLEAN", "description": "Only list files with the number of matches (cheaper)."}
                 },
                 "required": ["pattern"]
             }
         }),
         json!({
             "name": "run_command",
-            "description": "Run a shell command (bash) inside the Linux sandbox. The workspace is mounted at /workspace and is the working directory. Use it to run programs, tests, linters, installers (pip, npm) and compilers. Returns the exit code and the combined stdout/stderr. Commands must not wait for input.",
+            "description": "Run a bash command in the sandbox; the workspace is the working directory. Returns the exit code and the combined output. Must not wait for input.",
             "parameters": {
                 "type": "OBJECT",
                 "properties": {
-                    "command": {"type": "STRING", "description": "The bash command line."},
-                    "cwd": {"type": "STRING", "description": "Working directory relative to the workspace root. Default: the root."},
-                    "timeout_secs": {"type": "INTEGER", "description": "Kill the command after this many seconds (default 120, max 900)."}
+                    "command": path("The bash command line."),
+                    "cwd": path("Folder, default: the root."),
+                    "timeout_secs": {"type": "INTEGER", "description": "Kill after this many seconds (default 120, max 900)."}
                 },
                 "required": ["command"]
             }
         }),
     ];
-    if cloud_enabled {
-        tools.push(json!({
-            "name": "drive_list",
-            "description": "List files and folders in the user's Google Drive storage for Gagent.",
-            "parameters": {
-                "type": "OBJECT",
-                "properties": { "path": {"type": "STRING", "description": "Drive folder, relative to the Gagent folder. Default: the root."} }
-            }
-        }));
-        tools.push(json!({
-            "name": "drive_upload",
-            "description": "Upload a workspace file to Google Drive (creates or replaces it).",
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {
-                    "path": {"type": "STRING", "description": "Workspace file to upload."},
-                    "remote_path": {"type": "STRING", "description": "Destination path in Drive. Default: same as `path`."}
-                },
-                "required": ["path"]
-            }
-        }));
-        tools.push(json!({
-            "name": "drive_download",
-            "description": "Download a file from Google Drive into the workspace.",
-            "parameters": {
-                "type": "OBJECT",
-                "properties": {
-                    "remote_path": {"type": "STRING", "description": "File path in Drive."},
-                    "path": {"type": "STRING", "description": "Workspace destination. Default: same as `remote_path`."}
-                },
-                "required": ["remote_path"]
-            }
-        }));
-    }
     Value::Array(tools)
 }
 
@@ -225,15 +309,13 @@ pub fn describe_call(name: &str, args: &Value) -> String {
             let more = if cmd.lines().count() > 1 { " ..." } else { "" };
             format!("Run `{}{more}`", truncate_end(first, 100))
         }
-        "drive_list" => format!("List Drive folder {}", s(&["path"])),
-        "drive_upload" => format!("Upload {} to Drive", s(&["path"])),
-        "drive_download" => format!("Download {} from Drive", s(&["remote_path"])),
         other => format!("Call {other}"),
     }
 }
 
 /// Runs one tool call. Never panics on bad input; errors become text for the model.
 pub fn execute(ctx: &ToolContext, name: &str, args: &Value) -> ToolOutput {
+    ctx.reads.lock().unwrap_or_else(|p| p.into_inner()).tick();
     let result = match name {
         "list_files" => list_files(ctx, args),
         "read_file" => read_file(ctx, args),
@@ -242,15 +324,119 @@ pub fn execute(ctx: &ToolContext, name: &str, args: &Value) -> ToolOutput {
         "delete_file" => delete_file(ctx, args),
         "search_files" => search_files(ctx, args),
         "run_command" => run_command(ctx, args),
-        "drive_list" => drive_list(ctx, args),
-        "drive_upload" => drive_upload(ctx, args),
-        "drive_download" => drive_download(ctx, args),
         other => Err(format!("unknown tool '{other}'")),
     };
-    match result {
+    let mut out = match result {
         Ok(out) => out,
         Err(e) => ToolOutput::err(format!("Error: {e}")),
+    };
+    // A file was just written: check it now, so mistakes show up in this very step
+    // instead of many steps (and many thousand tokens) later.
+    if out.ok && out.mutated && (name == "write_file" || name == "edit_file") {
+        if let Some(path) = arg_str(args, &["path", "file_path", "filepath", "filename"]) {
+            if let Some(note) = post_write_check(ctx, name, &path) {
+                if note.contains("FAILED") {
+                    out.summary.push_str(" (check failed)");
+                }
+                out.text.push('\n');
+                out.text.push_str(&note);
+            }
+        }
     }
+    out
+}
+
+/// Runs a quick check on a file the agent just wrote. `None`: nothing to say.
+fn post_write_check(ctx: &ToolContext, tool: &str, rel: &str) -> Option<String> {
+    if ctx.check == CheckLevel::Off {
+        return None;
+    }
+    let rel = normalize_rel(rel).ok()?;
+    let ext = rel.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "json" => {
+            // Needs no sandbox.
+            let text = std::fs::read_to_string(ctx.work.resolve(&rel).ok()?).ok()?;
+            Some(match serde_json::from_str::<Value>(&text) {
+                Ok(_) => "[check: valid JSON]".to_string(),
+                Err(e) => format!("[check FAILED: invalid JSON: {e}]"),
+            })
+        }
+        "py" => run_check(
+            ctx,
+            &format!(
+                r#"python3 -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' {}"#,
+                shell_quote(&rel)
+            ),
+            "Python syntax",
+            30,
+        ),
+        "js" | "mjs" | "cjs" => run_check(
+            ctx,
+            &format!("node --check {}", shell_quote(&rel)),
+            "JavaScript syntax",
+            30,
+        ),
+        // Compiling is expensive, so it only runs after an edit (the repair loop), at the
+        // Rust level, and not more often than once per half minute.
+        "rs" if ctx.check == CheckLevel::Rust
+            && tool == "edit_file"
+            && ctx.work.root().join("Cargo.toml").is_file()
+            && cargo_check_due() =>
+        {
+            run_check(
+                ctx,
+                "out=$(cargo check --message-format=short --color never 2>&1); code=$?; \
+printf '%s\\n' \"$out\" | grep -v -E '^ *(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Blocking) ' | head -n 40; exit $code",
+                "cargo check",
+                240,
+            )
+        }
+        _ => None,
+    }
+}
+
+/// True when the last `cargo check` of the agent is more than 30 seconds ago.
+fn cargo_check_due() -> bool {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let mut last = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let due = last.is_none_or(|t| t.elapsed() > Duration::from_secs(30));
+    if due {
+        *last = Some(Instant::now());
+    }
+    due
+}
+
+/// Runs `command` in the sandbox. Success is a short note; a failure carries the first lines
+/// of its output. A missing sandbox or a missing checker (exit 127) says nothing.
+fn run_check(ctx: &ToolContext, command: &str, label: &str, secs: u32) -> Option<String> {
+    let req = ExecRequest {
+        command: command.to_string(),
+        cwd: String::new(),
+        timeout_secs: secs,
+    };
+    let result = ctx.sandbox.exec(&req, &ctx.cancel).ok()?;
+    if result.cancelled || result.timed_out {
+        return None;
+    }
+    match result.exit_code {
+        Some(0) => Some(format!("[check: {label} OK]")),
+        Some(127) | None => None,
+        Some(_) => {
+            let (output, _) = truncate_middle(result.output.trim(), 1800);
+            Some(format!("[check FAILED: {label}]\n{output}"))
+        }
+    }
+}
+
+/// Quotes a string for bash.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +574,19 @@ fn read_file(ctx: &ToolContext, args: &Value) -> ToolResult {
         return Err("end_line must not be smaller than start_line".into());
     }
     let last = last.min(first + DEFAULT_READ_LINES - 1);
+    {
+        let mut log = ctx.reads.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ago) = log.recent_read(&rel, first, last, &meta) {
+            return Ok(ToolOutput::ok(
+                format!(
+                    "[{rel}: lines {first}-{last} are unchanged since your read {ago} step(s) ago; that result is still above, use it]"
+                ),
+                "unchanged",
+                false,
+            ));
+        }
+        log.remember(&rel, first, last, &meta);
+    }
     let width = last.to_string().len().max(4);
     let mut out = format!("[{rel}: lines {first}-{last} of {total}]\n");
     for (i, line) in lines[first - 1..last].iter().enumerate() {
@@ -424,6 +623,12 @@ fn write_file(ctx: &ToolContext, args: &Value) -> ToolResult {
         return Err(format!("'{rel}' is a folder"));
     }
     let existed = path.exists();
+    // Keep the line endings of a file that uses Windows (CRLF) endings, so that
+    // rewriting it does not turn every line into a change.
+    let content = match std::fs::read(&path) {
+        Ok(old) if uses_crlf(&old) && !content.contains('\r') => content.replace('\n', "\r\n"),
+        _ => content,
+    };
     write_atomic(&path, content.as_bytes()).map_err(|e| format!("{e:#}"))?;
     let lines = content.lines().count();
     let verb = if existed { "Overwrote" } else { "Created" };
@@ -435,6 +640,19 @@ fn write_file(ctx: &ToolContext, args: &Value) -> ToolResult {
         format!("{} lines", lines),
         true,
     ))
+}
+
+/// Converts every line break in `s` to `\r\n`.
+fn to_crlf(s: &str) -> String {
+    s.replace("\r\n", "\n").replace('\n', "\r\n")
+}
+
+/// True when most line breaks in `bytes` are `\r\n`.
+fn uses_crlf(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(256 * 1024)];
+    let crlf = sample.windows(2).filter(|w| w == b"\r\n").count();
+    let lf = sample.iter().filter(|b| **b == b'\n').count();
+    crlf > 0 && crlf * 2 >= lf
 }
 
 fn edit_file(ctx: &ToolContext, args: &Value) -> ToolResult {
@@ -459,9 +677,14 @@ fn edit_file(ctx: &ToolContext, args: &Value) -> ToolResult {
     let text = String::from_utf8(bytes).map_err(|_| format!("'{rel}' is not valid UTF-8"))?;
 
     let (old_eff, new_eff) = if text.contains(&old) {
-        (old.clone(), new.clone())
+        let new_eff = if uses_crlf(text.as_bytes()) {
+            to_crlf(&new)
+        } else {
+            new.clone()
+        };
+        (old.clone(), new_eff)
     } else if text.contains("\r\n") && !old.contains("\r\n") {
-        (old.replace('\n', "\r\n"), new.replace('\n', "\r\n"))
+        (to_crlf(&old), to_crlf(&new))
     } else {
         (old.clone(), new.clone())
     };
@@ -551,6 +774,8 @@ fn search_files(ctx: &ToolContext, args: &Value) -> ToolResult {
             None => None,
         };
 
+    let files_only = arg_bool(args, "files_only");
+    let mut per_file: Vec<(String, usize)> = Vec::new();
     let mut results = Vec::new();
     let mut files_with_hits = 0;
     'files: for file in walk_files(ctx.work.root(), ctx.opts).map_err(|e| e.to_string())? {
@@ -574,6 +799,16 @@ fn search_files(ctx: &ToolContext, args: &Value) -> ToolResult {
         }
         let text = String::from_utf8_lossy(&bytes);
         let mut hit = false;
+        if files_only {
+            let n = text.lines().filter(|l| regex.is_match(l)).count();
+            if n > 0 {
+                per_file.push((file.rel.clone(), n));
+                if per_file.len() >= MAX_LIST_LINES {
+                    break 'files;
+                }
+            }
+            continue;
+        }
         for (i, line) in text.lines().enumerate() {
             if regex.is_match(line) {
                 hit = true;
@@ -593,13 +828,32 @@ fn search_files(ctx: &ToolContext, args: &Value) -> ToolResult {
             files_with_hits += 1;
         }
     }
+    if files_only {
+        if per_file.is_empty() {
+            return Ok(ToolOutput::ok("No matches.", "no matches", false));
+        }
+        let total: usize = per_file.iter().map(|(_, n)| n).sum();
+        let mut out: String = per_file
+            .iter()
+            .map(|(f, n)| format!("{f}: {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if per_file.len() >= MAX_LIST_LINES {
+            out.push_str("\n[list cut; narrow the search]");
+        }
+        return Ok(ToolOutput::ok(
+            out,
+            format!("{total} matches in {} files", per_file.len()),
+            false,
+        ));
+    }
     if results.is_empty() {
         return Ok(ToolOutput::ok("No matches.", "no matches", false));
     }
     let mut out = results.join("\n");
     if results.len() >= MAX_SEARCH_RESULTS {
         out.push_str(&format!(
-            "\n[stopped after {MAX_SEARCH_RESULTS} matches; narrow the search]"
+            "\n[stopped after {MAX_SEARCH_RESULTS} matches; narrow the search or use files_only]"
         ));
     }
     Ok(ToolOutput::ok(
@@ -625,6 +879,9 @@ fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
     if ctx.cancel.load(Ordering::Relaxed) {
         return Err("cancelled".into());
     }
+    ctx.approvals
+        .authorize(&command, ctx.work.root(), ctx.sandbox.needs_policy(), &ctx.cancel)?;
+    let probed = probe_sandbox_once(ctx).filter(|n| !n.is_empty());
     let req = ExecRequest {
         command,
         cwd,
@@ -635,7 +892,8 @@ fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
         .exec(&req, &ctx.cancel)
         .map_err(|e| format!("{e:#}"))?;
 
-    let (output, cut) = truncate_middle(result.output.trim_end(), MAX_COMMAND_OUTPUT_CHARS);
+    let cleaned = clean_command_output(result.output.trim_end());
+    let (output, cut) = truncate_middle(&cleaned, MAX_COMMAND_OUTPUT_CHARS);
     let secs = round1(result.duration);
     let status_line = if result.cancelled {
         "CANCELLED by the user".to_string()
@@ -648,6 +906,9 @@ fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
         }
     };
     let mut text = format!("{status_line}\nduration: {secs}s\n");
+    if let Some(note) = probed {
+        text.push_str(&format!("[sandbox tools: {note}]\n"));
+    }
     if output.is_empty() {
         text.push_str("(no output)");
     } else {
@@ -676,74 +937,65 @@ fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
     Ok(out)
 }
 
+/// Removes noise from long command output: build progress lines (cargo, npm) and
+/// endless repeats of one line. Short output is left exactly as it is.
+pub fn clean_command_output(text: &str) -> String {
+    const NOISE: &[&str] = &[
+        "Compiling ",
+        "Downloaded ",
+        "Downloading ",
+        "Checking ",
+        "Fresh ",
+        "Updating ",
+        "Locking ",
+        "Adding ",
+        "Blocking ",
+        "Unpacking ",
+    ];
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() < 40 {
+        return text.to_string();
+    }
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let (mut removed, mut repeats) = (0usize, 0usize);
+    let mut last: Option<&str> = None;
+    for line in &lines {
+        let trimmed = line.trim_start();
+        if NOISE.iter().any(|n| trimmed.starts_with(n)) {
+            removed += 1;
+            continue;
+        }
+        if last == Some(*line) && !line.trim().is_empty() {
+            repeats += 1;
+            if repeats > 2 {
+                continue;
+            }
+        } else {
+            if repeats > 2 {
+                out.push(format!(
+                    "[the line above repeated {} more times]",
+                    repeats - 2
+                ));
+            }
+            repeats = 0;
+        }
+        last = Some(*line);
+        out.push((*line).to_string());
+    }
+    if repeats > 2 {
+        out.push(format!(
+            "[the line above repeated {} more times]",
+            repeats - 2
+        ));
+    }
+    if removed > 0 {
+        out.insert(0, format!("[{removed} build progress lines removed]"));
+    }
+    out.join("\n")
+}
+
 fn round1(d: Duration) -> String {
     format!("{:.1}", d.as_secs_f64())
-}
-
-// ---------------------------------------------------------------------------
-// Drive tools
-// ---------------------------------------------------------------------------
-
-fn cloud(ctx: &ToolContext) -> Result<&Arc<dyn CloudStore>, String> {
-    ctx.cloud
-        .as_ref()
-        .ok_or_else(|| "Google Drive is not connected".to_string())
-}
-
-fn drive_list(ctx: &ToolContext, args: &Value) -> ToolResult {
-    let path = arg_str(args, &["path"]).unwrap_or_default();
-    let entries = cloud(ctx)?.list(&path).map_err(|e| format!("{e:#}"))?;
-    if entries.is_empty() {
-        return Ok(ToolOutput::ok("(empty or missing folder)", "empty", false));
-    }
-    let lines: Vec<String> = entries
-        .iter()
-        .map(|e| {
-            if e.is_dir {
-                format!("{}/", e.path)
-            } else {
-                format!("{}  ({})", e.path, human_bytes(e.size))
-            }
-        })
-        .collect();
-    Ok(ToolOutput::ok(
-        lines.join("\n"),
-        format!("{} entries", entries.len()),
-        false,
-    ))
-}
-
-fn drive_upload(ctx: &ToolContext, args: &Value) -> ToolResult {
-    let rel = required_str(args, &["path", "file_path"])?;
-    let remote = arg_str(args, &["remote_path"]).unwrap_or_else(|| rel.clone());
-    let path = ctx.work.resolve(&rel).map_err(|e| e.to_string())?;
-    let data = std::fs::read(&path).map_err(|_| format!("file '{rel}' does not exist"))?;
-    let file = cloud(ctx)?
-        .upload(&remote, &data)
-        .map_err(|e| format!("{e:#}"))?;
-    Ok(ToolOutput::ok(
-        format!("Uploaded {rel} to Drive as {}", file.path),
-        "uploaded",
-        false,
-    ))
-}
-
-fn drive_download(ctx: &ToolContext, args: &Value) -> ToolResult {
-    let remote = required_str(args, &["remote_path"])?;
-    let rel = arg_str(args, &["path"]).unwrap_or_else(|| remote.clone());
-    let path = ctx.work.resolve(&rel).map_err(|e| e.to_string())?;
-    let data = cloud(ctx)?
-        .download(&remote)
-        .map_err(|e| format!("{e:#}"))?;
-    write_atomic(&path, &data).map_err(|e| format!("{e:#}"))?;
-    Ok(ToolOutput::ok(
-        format!(
-            "Downloaded {remote} to {rel} ({})",
-            human_bytes(data.len() as u64)
-        ),
-        "downloaded",
-        true,
-    ))
 }
 
 #[cfg(test)]
@@ -753,24 +1005,34 @@ mod tests {
     use std::fs;
 
     struct Fx {
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
         ctx: ToolContext,
         sandbox: Arc<ScriptedSandbox>,
     }
 
     fn fx(results: Vec<ExecResult>) -> Fx {
+        fx_with(ScriptedSandbox::new(results))
+    }
+
+    fn fx_with(sandbox: ScriptedSandbox) -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let sandbox = Arc::new(ScriptedSandbox::new(results));
+        let sandbox = Arc::new(sandbox);
         let ctx = ToolContext {
             work: Workspace::new(dir.path()).unwrap(),
             sandbox: sandbox.clone(),
-            cloud: None,
             opts: WalkOptions::default(),
             default_timeout_secs: 60,
             cancel: Arc::new(AtomicBool::new(false)),
+            check: CheckLevel::Off,
+            // Already "looked at": the scripted sandbox must not spend a result on the probe.
+            tools_note: Arc::new(std::sync::Mutex::new(Some(String::new()))),
+            approvals: Arc::new(crate::permission::Approvals::new(
+                crate::config::PermissionMode::Auto,
+            )),
+            reads: Default::default(),
         };
         Fx {
-            _dir: dir,
+            dir,
             ctx,
             sandbox,
         }
@@ -791,10 +1053,6 @@ mod tests {
         assert!(w.ok, "{}", w.text);
         assert!(w.mutated);
         assert!(w.text.contains("Created src/app.py"));
-        let r = call(&f, "read_file", json!({"path":"src/app.py"}));
-        assert!(r.ok);
-        assert!(r.text.contains("   1 | a = 1"), "{}", r.text);
-        assert!(r.text.contains("   3 | c = 3"));
         let r = call(
             &f,
             "read_file",
@@ -805,8 +1063,217 @@ mod tests {
             "{}",
             r.text
         );
+        let r = call(&f, "read_file", json!({"path":"src/app.py"}));
+        assert!(r.ok);
+        assert!(r.text.contains("   1 | a = 1"), "{}", r.text);
+        assert!(r.text.contains("   3 | c = 3"));
         let w2 = call(&f, "write_file", json!({"path":"src/app.py","content":"x"}));
         assert!(w2.text.contains("Overwrote"));
+    }
+
+    #[test]
+    fn read_file_returns_at_most_500_lines_by_default() {
+        let f = fx(vec![]);
+        fs::write(f.ctx.work.root().join("long.txt"), "x\n".repeat(1200)).unwrap();
+        let r = call(&f, "read_file", json!({"path":"long.txt"}));
+        assert!(r.ok);
+        assert!(r.text.contains("lines 1-500 of 1200"), "{}", &r.text[..80]);
+        assert!(r.text.contains("start_line=501"));
+    }
+
+    #[test]
+    fn cargo_noise_and_repeats_are_removed_from_long_output() {
+        let mut text = String::new();
+        for i in 0..60 {
+            text.push_str(&format!("   Compiling crate{i} v0.1.0\n"));
+        }
+        text.push_str("error[E0382]: borrow of moved value\n --> src/main.rs:3:5\n");
+        for _ in 0..30 {
+            text.push_str("same line again\n");
+        }
+        text.push_str("test result: FAILED. 1 passed; 1 failed\n");
+        let cleaned = clean_command_output(&text);
+        assert!(!cleaned.contains("Compiling crate7"));
+        assert!(cleaned.starts_with("[60 build progress lines removed]"));
+        assert!(cleaned.contains("error[E0382]"));
+        assert!(cleaned.contains("src/main.rs:3:5"));
+        assert!(cleaned.contains("[the line above repeated 27 more times]"));
+        assert!(cleaned.contains("test result: FAILED"));
+        assert!(cleaned.len() * 5 < text.len());
+        // Short output stays exactly as it is.
+        let short = "   Compiling a v1\nok\n";
+        assert_eq!(clean_command_output(short), short);
+    }
+
+    #[test]
+    fn written_python_files_are_checked() {
+        let mut f = fx(vec![
+            ExecResult {
+                exit_code: Some(0),
+                ..Default::default()
+            },
+            ExecResult {
+                exit_code: Some(1),
+                output: "  File \"a.py\", line 1\nSyntaxError: invalid syntax\n".into(),
+                ..Default::default()
+            },
+            ExecResult {
+                exit_code: Some(127),
+                output: "python3: not found".into(),
+                ..Default::default()
+            },
+        ]);
+        f.ctx.check = CheckLevel::Light;
+        let ok = call(&f, "write_file", json!({"path":"a.py","content":"x = 1\n"}));
+        assert!(
+            ok.ok && ok.text.contains("[check: Python syntax OK]"),
+            "{}",
+            ok.text
+        );
+        let bad = call(&f, "write_file", json!({"path":"b.py","content":"x ="}));
+        assert!(bad.ok, "the write itself succeeded");
+        assert!(
+            bad.text.contains("[check FAILED: Python syntax]"),
+            "{}",
+            bad.text
+        );
+        assert!(bad.text.contains("SyntaxError"));
+        assert!(bad.summary.contains("check failed"));
+        // A missing checker (exit 127) is not reported.
+        let none = call(&f, "write_file", json!({"path":"c.py","content":"x = 1\n"}));
+        assert!(!none.text.contains("check"), "{}", none.text);
+        let cmds = f.sandbox.commands.lock().unwrap();
+        assert_eq!(cmds.len(), 3);
+        assert!(cmds[0].contains("ast.parse") && cmds[0].contains("'a.py'"));
+    }
+
+    #[test]
+    fn checks_can_be_switched_off_and_json_needs_no_sandbox() {
+        let f = fx(vec![]);
+        let w = call(&f, "write_file", json!({"path":"a.py","content":"x = 1\n"}));
+        assert!(!w.text.contains("check"));
+        assert!(f.sandbox.commands.lock().unwrap().is_empty());
+
+        let mut g = fx(vec![]);
+        g.ctx.check = CheckLevel::Light;
+        let good = call(
+            &g,
+            "write_file",
+            json!({"path":"a.json","content":"{\"a\": 1}"}),
+        );
+        assert!(good.text.contains("[check: valid JSON]"), "{}", good.text);
+        let bad = call(
+            &g,
+            "write_file",
+            json!({"path":"b.json","content":"{\"a\": }"}),
+        );
+        assert!(
+            bad.text.contains("[check FAILED: invalid JSON"),
+            "{}",
+            bad.text
+        );
+        assert!(g.sandbox.commands.lock().unwrap().is_empty());
+        // Other file types are not checked.
+        let md = call(&g, "write_file", json!({"path":"a.md","content":"# hi"}));
+        assert!(!md.text.contains("check"));
+    }
+
+    #[test]
+    fn rust_is_only_checked_after_edits_at_the_rust_level() {
+        let mut f = fx(vec![ExecResult {
+            exit_code: Some(101),
+            output: "src/lib.rs:1:1: error[E0425]: cannot find value `x`\n".into(),
+            ..Default::default()
+        }]);
+        fs::write(
+            f.ctx.work.root().join("Cargo.toml"),
+            "[package]\nname=\"t\"\n",
+        )
+        .unwrap();
+        f.ctx.check = CheckLevel::Light;
+        let w = call(
+            &f,
+            "write_file",
+            json!({"path":"src/lib.rs","content":"fn a() {}\n"}),
+        );
+        assert!(!w.text.contains("check"), "Light does not compile");
+        f.ctx.check = CheckLevel::Rust;
+        let w = call(
+            &f,
+            "write_file",
+            json!({"path":"src/lib.rs","content":"fn a() {}\n"}),
+        );
+        assert!(!w.text.contains("check"), "a fresh write is not compiled");
+        assert!(f.sandbox.commands.lock().unwrap().is_empty());
+        let e = call(
+            &f,
+            "edit_file",
+            json!({"path":"src/lib.rs","old_text":"fn a()","new_text":"fn b()"}),
+        );
+        assert!(e.text.contains("[check FAILED: cargo check]"), "{}", e.text);
+        assert!(e.text.contains("E0425"));
+        assert!(f.sandbox.commands.lock().unwrap()[0].contains("cargo check"));
+    }
+
+    #[test]
+    fn the_first_command_looks_at_the_sandbox_once() {
+        let f = fx(vec![
+            ExecResult {
+                exit_code: Some(0),
+                output: "tools: python3 pip3 git \npython: Python 3.12.3\n".into(),
+                ..Default::default()
+            },
+            ExecResult {
+                exit_code: Some(0),
+                output: "one\n".into(),
+                ..Default::default()
+            },
+            ExecResult {
+                exit_code: Some(0),
+                output: "two\n".into(),
+                ..Default::default()
+            },
+        ]);
+        *f.ctx.tools_note.lock().unwrap() = None;
+        let first = call(&f, "run_command", json!({"command":"echo one"}));
+        assert!(
+            first
+                .text
+                .contains("[sandbox tools: python3 pip3 git; python: Python 3.12.3]"),
+            "{}",
+            first.text
+        );
+        assert!(first.text.contains("one"));
+        let second = call(&f, "run_command", json!({"command":"echo two"}));
+        assert!(!second.text.contains("sandbox tools"));
+        let cmds = f.sandbox.commands.lock().unwrap();
+        assert_eq!(cmds.len(), 3, "the probe ran once: {cmds:?}");
+        assert!(cmds[0].contains("command -v"));
+        assert_eq!(cmds[1], "echo one");
+        assert_eq!(
+            f.ctx.tools_note.lock().unwrap().as_deref(),
+            Some("python3 pip3 git; python: Python 3.12.3")
+        );
+    }
+
+    #[test]
+    fn probe_output_is_summarized() {
+        let out = "tools: python3 git \nbash: node: not found\npython: Python 3.14.4\nrust targets: x86_64-pc-windows-gnu x86_64-unknown-linux-gnu \n";
+        assert_eq!(
+            summarize_probe(out),
+            "python3 git; python: Python 3.14.4; rust targets: x86_64-pc-windows-gnu x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(summarize_probe("tools: \n"), "no common tools");
+        assert_eq!(summarize_probe(""), "");
+    }
+
+    #[test]
+    fn declarations_stay_small() {
+        let size = declarations().to_string().len();
+        assert!(
+            size < 3_800,
+            "tool declarations are sent with every request: {size} chars"
+        );
     }
 
     #[test]
@@ -875,6 +1342,30 @@ mod tests {
             fs::read_to_string(f.ctx.work.root().join("w.txt")).unwrap(),
             "1\r\n2\r\nthree\r\n"
         );
+    }
+
+    #[test]
+    fn crlf_files_keep_their_line_endings() {
+        let f = fx(vec![]);
+        let path = f.ctx.work.root().join("w.txt");
+        fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        // A single-line match that inserts several lines.
+        let e = call(
+            &f,
+            "edit_file",
+            json!({"path":"w.txt","old_text":"two","new_text":"2a\n2b"}),
+        );
+        assert!(e.ok, "{}", e.text);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "one\r\n2a\r\n2b\r\n");
+        // Rewriting the whole file keeps CRLF too.
+        let w = call(&f, "write_file", json!({"path":"w.txt","content":"a\nb\n"}));
+        assert!(w.ok, "{}", w.text);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\r\nb\r\n");
+        // LF files stay LF.
+        fs::write(&path, "x\ny\n").unwrap();
+        let w = call(&f, "write_file", json!({"path":"w.txt","content":"a\nb\n"}));
+        assert!(w.ok);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\n");
     }
 
     #[test]
@@ -1010,7 +1501,8 @@ mod tests {
 
     #[test]
     fn long_output_is_shortened() {
-        let big = "line\n".repeat(20_000);
+        // Different lines: identical repeats are collapsed before the length limit applies.
+        let big: String = (0..20_000).map(|i| format!("line number {i}\n")).collect();
         let f = fx(vec![ExecResult {
             exit_code: Some(0),
             output: big,
@@ -1019,6 +1511,117 @@ mod tests {
         let r = call(&f, "run_command", json!({"command":"yes"}));
         assert!(r.text.contains("characters omitted"));
         assert!(r.text.chars().count() < MAX_COMMAND_OUTPUT_CHARS + 500);
+    }
+
+    #[test]
+    fn an_endless_repeat_does_not_fill_the_context() {
+        let f = fx(vec![ExecResult {
+            exit_code: Some(1),
+            output: format!("{}done\n", "retrying connection...\n".repeat(20_000)),
+            ..Default::default()
+        }]);
+        let r = call(&f, "run_command", json!({"command":"loop"}));
+        assert!(
+            r.text.contains("repeated 19997 more times"),
+            "{}",
+            &r.text[..200.min(r.text.len())]
+        );
+        assert!(r.text.contains("done"));
+        assert!(r.text.len() < 600, "{} characters", r.text.len());
+    }
+
+    #[test]
+    fn rereading_an_unchanged_range_costs_almost_nothing() {
+        let f = fx(vec![]);
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(f.dir.path().join("a.txt"), &body).unwrap();
+        let first = call(&f, "read_file", json!({"path":"a.txt"}));
+        assert!(first.text.contains("line 50"));
+        let again = call(&f, "read_file", json!({"path":"a.txt"}));
+        assert!(again.ok);
+        assert!(again.text.contains("unchanged"), "{}", again.text);
+        assert!(again.text.len() < 200);
+        // A smaller part of what was read is covered too.
+        let part = call(&f, "read_file", json!({"path":"a.txt","start_line":10,"end_line":20}));
+        assert!(part.text.contains("unchanged"), "{}", part.text);
+        // After a change the real content comes back.
+        std::fs::write(f.dir.path().join("a.txt"), format!("{body}extra\n")).unwrap();
+        let changed = call(&f, "read_file", json!({"path":"a.txt"}));
+        assert!(changed.text.contains("extra"), "{}", changed.text);
+    }
+
+    #[test]
+    fn an_old_read_is_repeated_because_the_history_may_have_shortened_it() {
+        let f = fx(vec![]);
+        std::fs::write(f.dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        call(&f, "read_file", json!({"path":"a.txt"}));
+        for _ in 0..8 {
+            call(&f, "list_files", json!({}));
+        }
+        let again = call(&f, "read_file", json!({"path":"a.txt"}));
+        assert!(again.text.contains("two"), "{}", again.text);
+    }
+
+    #[test]
+    fn search_can_list_only_the_files() {
+        let f = fx(vec![]);
+        std::fs::write(f.dir.path().join("a.py"), "def x():\n    pass\ndef y():\n    pass\n").unwrap();
+        std::fs::write(f.dir.path().join("b.py"), "def z():\n    pass\n").unwrap();
+        std::fs::write(f.dir.path().join("c.py"), "nothing\n").unwrap();
+        let r = call(&f, "search_files", json!({"pattern":"^def ","files_only":true}));
+        assert!(r.ok);
+        assert!(r.text.contains("a.py: 2") && r.text.contains("b.py: 1"), "{}", r.text);
+        assert!(!r.text.contains("c.py") && !r.text.contains("def x"), "{}", r.text);
+        assert_eq!(r.summary, "3 matches in 2 files");
+    }
+
+    #[test]
+    fn a_command_on_the_users_computer_is_checked_first() {
+        let f = fx_with(
+            ScriptedSandbox::new(vec![
+                ExecResult {
+                    exit_code: Some(0),
+                    output: "fine".into(),
+                    ..Default::default()
+                },
+                ExecResult {
+                    exit_code: Some(0),
+                    output: "installed".into(),
+                    ..Default::default()
+                },
+            ])
+            .with_policy(),
+        );
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let log = asked.clone();
+        f.ctx.approvals.set_responder(move |req| {
+            log.lock().unwrap().push(format!("{} | {}", req.key, req.command));
+            if req.key == "install:pip" {
+                crate::permission::Decision::Allow
+            } else {
+                crate::permission::Decision::Deny
+            }
+        });
+        // Refused for good, and nobody is asked.
+        let r = call(&f, "run_command", json!({"command":"sudo rm -rf x"}));
+        assert!(!r.ok);
+        assert!(r.text.contains("blocked") && r.text.contains("sudo"), "{}", r.text);
+        assert!(asked.lock().unwrap().is_empty());
+        // The user says no.
+        let r = call(&f, "run_command", json!({"command":"cat /etc/passwd"}));
+        assert!(!r.ok);
+        assert!(r.text.contains("did not allow") && r.text.contains("outside the workspace"), "{}", r.text);
+        // Nothing reached the sandbox yet.
+        assert_eq!(f.sandbox.commands.lock().unwrap().len(), 0);
+        // An ordinary command runs without a question, an install after a yes.
+        let r = call(&f, "run_command", json!({"command":"python main.py"}));
+        assert!(r.ok, "{}", r.text);
+        let r = call(&f, "run_command", json!({"command":"pip install rich"}));
+        assert!(r.ok && r.text.contains("installed"), "{}", r.text);
+        assert_eq!(f.sandbox.commands.lock().unwrap().len(), 2);
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(asked[1].starts_with("install:pip | pip install"), "{asked:?}");
     }
 
     #[test]
@@ -1034,7 +1637,7 @@ mod tests {
 
     #[test]
     fn declarations_are_valid_for_gemini() {
-        let d = declarations(false);
+        let d = declarations();
         let arr = d.as_array().unwrap();
         assert_eq!(arr.len(), 7);
         for t in arr {
@@ -1045,7 +1648,6 @@ mod tests {
                 .map(|p| !p.is_empty())
                 .unwrap_or(false));
         }
-        assert_eq!(declarations(true).as_array().unwrap().len(), 10);
     }
 
     #[test]
@@ -1062,84 +1664,5 @@ mod tests {
             "Run `pytest -q ...`"
         );
         assert_eq!(describe_call("list_files", &json!({})), "List files in .");
-    }
-
-    #[derive(Default)]
-    struct MemoryCloud {
-        files: std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
-    }
-
-    impl CloudStore for MemoryCloud {
-        fn list(&self, _dir: &str) -> anyhow::Result<Vec<crate::drive::RemoteFile>> {
-            Ok(self
-                .files
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(p, d)| crate::drive::RemoteFile {
-                    id: p.clone(),
-                    name: p.clone(),
-                    path: p.clone(),
-                    is_dir: false,
-                    size: d.len() as u64,
-                    modified: String::new(),
-                    sha256: None,
-                })
-                .collect())
-        }
-        fn upload(&self, path: &str, data: &[u8]) -> anyhow::Result<crate::drive::RemoteFile> {
-            self.files
-                .lock()
-                .unwrap()
-                .insert(path.to_string(), data.to_vec());
-            Ok(crate::drive::RemoteFile {
-                id: path.into(),
-                name: path.into(),
-                path: path.into(),
-                is_dir: false,
-                size: data.len() as u64,
-                modified: String::new(),
-                sha256: None,
-            })
-        }
-        fn download(&self, path: &str) -> anyhow::Result<Vec<u8>> {
-            self.files
-                .lock()
-                .unwrap()
-                .get(path)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("not found"))
-        }
-    }
-
-    #[test]
-    fn drive_tools_round_trip() {
-        let mut f = fx(vec![]);
-        f.ctx.cloud = Some(Arc::new(MemoryCloud::default()));
-        fs::write(f.ctx.work.root().join("data.csv"), "a,b\n1,2\n").unwrap();
-        assert!(
-            call(
-                &f,
-                "drive_upload",
-                json!({"path":"data.csv","remote_path":"backup/data.csv"})
-            )
-            .ok
-        );
-        let l = call(&f, "drive_list", json!({}));
-        assert!(l.text.contains("backup/data.csv"));
-        let d = call(
-            &f,
-            "drive_download",
-            json!({"remote_path":"backup/data.csv","path":"restored/data.csv"}),
-        );
-        assert!(d.ok, "{}", d.text);
-        assert_eq!(
-            fs::read_to_string(f.ctx.work.root().join("restored/data.csv")).unwrap(),
-            "a,b\n1,2\n"
-        );
-        assert!(!call(&f, "drive_download", json!({"remote_path":"missing"})).ok);
-
-        let g = fx(vec![]);
-        assert!(!call(&g, "drive_list", json!({})).ok);
     }
 }

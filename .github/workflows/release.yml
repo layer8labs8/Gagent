@@ -1,0 +1,60 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the programs and attaches them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist
+          cp target/release/gagent target/release/gagent-cli README.md LICENSE dist/
+          cp -r scripts dist/
+          tar -C dist -czf gagent-${{ matrix.name }}.tar.gz .
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/gagent.exe, target/release/gagent-cli.exe, README.md, LICENSE dist/
+          Compress-Archive -Path dist/* -DestinationPath gagent-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gagent-${{ matrix.name }}
+          path: |
+            gagent-${{ matrix.name }}.tar.gz
+            gagent-${{ matrix.name }}.zip
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
