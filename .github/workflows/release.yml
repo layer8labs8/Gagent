@@ -13,6 +13,7 @@ jobs:
     strategy:
       matrix:
         include:
+          # ubuntu-22.04 has the oldest C library we support; the program runs on newer systems too.
           - os: ubuntu-22.04
             name: linux-x86_64
           - os: windows-latest
@@ -27,23 +28,28 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir dist
-          cp target/release/gagent target/release/gagent-cli README.md LICENSE dist/
-          cp -r scripts dist/
-          tar -C dist -czf gagent-${{ matrix.name }}.tar.gz .
+          mkdir -p dist/Gagent
+          cp target/release/gagent target/release/gagent-cli README.md LICENSE dist/Gagent/
+          cp -r scripts dist/Gagent/
+          tar -C dist -czf Gagent-${{ matrix.name }}.tar.gz Gagent
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/release/gagent.exe, target/release/gagent-cli.exe, README.md, LICENSE dist/
-          Compress-Archive -Path dist/* -DestinationPath gagent-${{ matrix.name }}.zip
+          New-Item -ItemType Directory dist/Gagent | Out-Null
+          Copy-Item target/release/gagent.exe dist/Gagent/Gagent.exe
+          Copy-Item target/release/gagent-cli.exe, README.md, LICENSE dist/Gagent/
+          Copy-Item -Recurse scripts dist/Gagent/scripts
+          Compress-Archive -Path dist/Gagent -DestinationPath Gagent-${{ matrix.name }}.zip
+          # The program on its own, for a one-click download.
+          Copy-Item target/release/gagent.exe Gagent.exe
       - uses: actions/upload-artifact@v4
         with:
           name: gagent-${{ matrix.name }}
           path: |
-            gagent-${{ matrix.name }}.tar.gz
-            gagent-${{ matrix.name }}.zip
+            Gagent-${{ matrix.name }}.tar.gz
+            Gagent-${{ matrix.name }}.zip
+            Gagent.exe
           if-no-files-found: ignore
 
   publish:
@@ -54,7 +60,19 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
           generate_release_notes: true
+          prerelease: true
+          body: |
+            **Windows:** download `Gagent.exe` and start it. The agent runs its commands with bash, which comes with
+            [Git for Windows](https://git-scm.com) (`winget install Git.Git`). `Gagent-windows-x86_64.zip` also holds
+            `gagent-cli.exe` and the install script.
+
+            **Linux:** unpack `Gagent-linux-x86_64.tar.gz` and run `gagent`, or use `scripts/install-ubuntu.sh`.
+
+            Open **Settings**, pick a service and paste your API key (see the README for where to get one).
+            Checksums are in `SHA256SUMS.txt`.
