@@ -13,12 +13,11 @@ use serde_json::Value;
 use super::state::*;
 use super::{apply_summary, Notifier};
 use crate::config::{AppDirs, SandboxSettings, Settings};
-use crate::drive::{self, CloudStore, DriveClient, Endpoints};
 use crate::engine::Engine;
-use crate::gemini::GeminiClient;
+use crate::permission::Approvals;
 use crate::sandbox::{self, DockerSandbox, ExecRequest, Progress};
 use crate::util::{human_bytes, unique_id, write_atomic};
-use crate::workspace::{normalize_rel, WalkOptions};
+use crate::workspace::normalize_rel;
 
 /// Largest file accepted as an attachment.
 const MAX_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
@@ -29,14 +28,17 @@ pub fn open_engine(
     settings: Settings,
     id: String,
     project: String,
-    cloud: Option<Arc<dyn CloudStore>>,
+    approvals: Arc<Approvals>,
 ) {
     thread::spawn(move || {
         let n = notify.clone();
         let progress: Progress = Arc::new(move |line| n.send(Msg::SandboxLog(line.to_string())));
         let result = catch_unwind(AssertUnwindSafe(|| {
-            Engine::open(&dirs, &settings, Path::new(&project), &id, progress, cloud)
-                .map(Arc::new)
+            Engine::open(&dirs, &settings, Path::new(&project), &id, progress)
+                .map(|mut engine| {
+                    engine.set_approvals(approvals);
+                    Arc::new(engine)
+                })
                 .map_err(|e| format!("{e:#}"))
         }))
         .unwrap_or_else(|_| Err("internal error while preparing the workspace".to_string()));
@@ -47,19 +49,18 @@ pub fn open_engine(
     });
 }
 
-pub fn check_docker(notify: Notifier, image: String) {
+pub fn check_docker(notify: Notifier, settings: SandboxSettings) {
     thread::spawn(move || {
-        notify.send(Msg::Docker(sandbox::docker_status(&image)));
+        notify.send(Msg::Docker(sandbox::sandbox_status(&settings)));
     });
 }
 
 pub fn load_models(notify: Notifier, settings: Settings) {
     thread::spawn(move || {
-        let key = settings.effective_api_key();
-        let result = if key.is_empty() {
-            Err("No API key set.".to_string())
+        let result = if !settings.is_configured() {
+            Err(settings.setup_hint())
         } else {
-            GeminiClient::new(&key, &settings.gemini_base_url())
+            crate::llm::make_client(&settings)
                 .list_models()
                 .map(|models| models.into_iter().map(|m| m.id).collect())
                 .map_err(|e| e.user_message())
@@ -188,7 +189,7 @@ pub fn run_terminal(
             cwd: String::new(),
             timeout_secs,
         };
-        let result = sandbox::Sandbox::exec(engine.docker.as_ref(), &req, &AtomicBool::new(false))
+        let result = sandbox::Sandbox::exec(engine.sandbox.as_ref(), &req, &AtomicBool::new(false))
             .map_err(|e| format!("{e:#}"));
         notify.send(Msg::Terminal {
             session,
@@ -241,148 +242,4 @@ pub fn attach_file(engine: &Engine, source: &Path) -> Result<String> {
     let data = fs::read(source)?;
     write_atomic(&work.join(&rel), &data)?;
     Ok(rel)
-}
-
-// ----- Drive ---------------------------------------------------------------
-
-pub fn drive_account(notify: Notifier, client: Arc<DriveClient>) {
-    thread::spawn(move || notify.send(Msg::DriveAccount(client.account_name())));
-}
-
-pub fn drive_list(notify: Notifier, client: Arc<DriveClient>, dir: String) {
-    thread::spawn(move || {
-        let result = client.list(&dir).map_err(|e| format!("{e:#}"));
-        notify.send(Msg::DriveEntries { dir, result });
-    });
-}
-
-pub fn drive_connect(
-    notify: Notifier,
-    settings: crate::config::DriveSettings,
-    cancel: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        let endpoints = Endpoints::default();
-        let result = (|| -> Result<String> {
-            let code = drive::start_device_flow(&endpoints, &settings.client_id)?;
-            notify.send(Msg::DriveCode(code.clone()));
-            let tokens = drive::wait_for_approval(
-                &endpoints,
-                &settings.client_id,
-                &settings.client_secret,
-                &code,
-                &cancel,
-            )?;
-            Ok(tokens.refresh_token)
-        })();
-        notify.send(Msg::DriveConnected(result.map_err(|e| format!("{e:#}"))));
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn drive_job(
-    notify: Notifier,
-    client: Arc<DriveClient>,
-    kind: DriveJobKind,
-    project: String,
-    work_dir: Option<PathBuf>,
-    sessions_dir: PathBuf,
-    opts: WalkOptions,
-    cancel: Arc<AtomicBool>,
-) {
-    thread::spawn(move || {
-        let label = kind.label().to_string();
-        let n = notify.clone();
-        let progress = move |line: &str| n.send(Msg::DriveProgress(line.to_string()));
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run_drive_job(
-                &client,
-                &kind,
-                &project,
-                work_dir.as_deref(),
-                &sessions_dir,
-                opts,
-                &progress,
-                &cancel,
-            )
-        }))
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("internal error")));
-        notify.send(Msg::DriveJob {
-            label,
-            result: result.map_err(|e| format!("{e:#}")),
-        });
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_drive_job(
-    client: &DriveClient,
-    kind: &DriveJobKind,
-    project: &str,
-    work_dir: Option<&Path>,
-    sessions_dir: &Path,
-    opts: WalkOptions,
-    progress: &dyn Fn(&str),
-    cancel: &AtomicBool,
-) -> Result<String> {
-    let name = super::GagentApp::project_name(project);
-    let remote = format!("projects/{name}");
-    match kind {
-        DriveJobKind::UploadProject => {
-            let (up, same) =
-                client.upload_tree(Path::new(project), &remote, opts, progress, cancel)?;
-            Ok(format!(
-                "{up} file(s) uploaded, {same} already up to date (Drive: {remote})"
-            ))
-        }
-        DriveJobKind::DownloadProject => {
-            let work = work_dir.context("the workspace is not ready")?;
-            let n = client.download_tree(&remote, work, progress, cancel)?;
-            if n == 0 {
-                bail!("nothing found in Drive under {remote}");
-            }
-            Ok(format!(
-                "{n} file(s) downloaded into the agent's copy. Review them in Changes, then apply."
-            ))
-        }
-        DriveJobKind::BackupSessions => {
-            let mut count = 0;
-            for entry in fs::read_dir(sessions_dir)?.flatten() {
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                if !file_name.ends_with(".json") {
-                    continue;
-                }
-                progress(&format!("Uploading {file_name}"));
-                client.upload(&format!("sessions/{file_name}"), &fs::read(entry.path())?)?;
-                count += 1;
-            }
-            Ok(format!("{count} session file(s) saved to Drive"))
-        }
-        DriveJobKind::RestoreSessions => {
-            let mut count = 0;
-            for file in client.list("sessions")? {
-                if file.is_dir || !file.name.ends_with(".json") || file.name.contains(['/', '\\']) {
-                    continue;
-                }
-                let target = sessions_dir.join(&file.name);
-                if target.exists() {
-                    continue;
-                }
-                progress(&format!("Downloading {}", file.name));
-                write_atomic(&target, &client.download(&file.path)?)?;
-                count += 1;
-            }
-            Ok(format!("{count} session(s) restored from Drive"))
-        }
-        DriveJobKind::DownloadFile(path) => {
-            let work = work_dir.context("the workspace is not ready")?;
-            let data = client.download(path)?;
-            let rel = normalize_rel(&format!("drive/{path}"))?;
-            write_atomic(&work.join(&rel), &data)?;
-            Ok(format!(
-                "saved as {rel} in the workspace ({})",
-                human_bytes(data.len() as u64)
-            ))
-        }
-    }
 }

@@ -29,7 +29,13 @@ impl ApiError {
     /// Temporary problems that are worth retrying.
     pub fn is_retryable(&self) -> bool {
         match self {
-            ApiError::Http { status, .. } => matches!(status, 408 | 429 | 500 | 502 | 503 | 504),
+            // A daily quota ("retry in 22h") will not come back within a few seconds.
+            ApiError::Http {
+                status: 429,
+                message,
+                ..
+            } => retry_hint_secs(message).is_none_or(|s| s <= 120),
+            ApiError::Http { status, .. } => matches!(status, 408 | 500 | 502 | 503 | 504),
             ApiError::Transport(_) => true,
             ApiError::Blocked(_) | ApiError::Malformed(_) => false,
         }
@@ -42,29 +48,56 @@ impl ApiError {
                 status, message, ..
             } => {
                 let lower = message.to_ascii_lowercase();
-                let hint = match status {
+                match status {
                     400 if lower.contains("api key") => {
-                        "The Gemini API key is not valid. Open Settings and check the key.".to_string()
+                        "The API key is not valid. Open Settings and check the key.".to_string()
                     }
                     400 => format!("The request was rejected: {message}"),
-                    401 => "The Gemini API key was rejected. Open Settings and check the key.".to_string(),
+                    401 => "The API key was rejected. Open Settings and check the key.".to_string(),
                     403 => format!(
-                        "Access denied. The key may be restricted, or the Gemini API is not enabled for it. ({message})"
+                        "Access denied. The key may be restricted, or the model is not enabled for it. ({message})"
                     ),
                     404 => format!(
                         "The model was not found. Choose another model in Settings. ({message})"
                     ),
+                    429 if retry_hint_secs(message).is_some_and(|s| s > 120) => format!(
+                        "The quota of this model is used up for now. Open Settings and choose another model or another AI service (for example NVIDIA). ({message})"
+                    ),
                     429 => format!("Rate limit or quota reached. Wait a moment, or pick another model. ({message})"),
-                    500..=599 => format!("The Gemini service had a temporary problem ({status}). {message}"),
-                    _ => format!("Gemini returned HTTP {status}: {message}"),
-                };
-                hint
+                    500..=599 => format!("The AI service had a temporary problem ({status}). {message}"),
+                    _ => format!("The AI service returned HTTP {status}: {message}"),
+                }
             }
-            ApiError::Transport(m) => format!("Could not reach Gemini: {m}"),
-            ApiError::Blocked(m) => format!("Gemini blocked this request: {m}"),
-            ApiError::Malformed(m) => format!("Unexpected answer from Gemini: {m}"),
+            ApiError::Transport(m) => format!("Could not reach the AI service: {m}"),
+            ApiError::Blocked(m) => format!("The AI service blocked this request: {m}"),
+            ApiError::Malformed(m) => format!("Unexpected answer from the AI service: {m}"),
         }
     }
+}
+
+/// Reads "Please retry in 22h30.6s" / "retry in 28s" from an error message, in seconds.
+pub fn retry_hint_secs(message: &str) -> Option<u64> {
+    let lower = message.to_ascii_lowercase();
+    let rest = &lower[lower.find("retry in ")? + "retry in ".len()..];
+    let mut total = 0.0f64;
+    let mut number = String::new();
+    let mut seen = false;
+    for c in rest.chars() {
+        if c.is_ascii_digit() || (c == '.' && !number.is_empty()) {
+            number.push(c);
+            continue;
+        }
+        let unit = match c {
+            'h' => 3600.0,
+            'm' => 60.0,
+            's' => 1.0,
+            _ => break,
+        };
+        total += number.parse::<f64>().ok()? * unit;
+        number.clear();
+        seen = true;
+    }
+    seen.then_some(total as u64)
 }
 
 impl std::fmt::Display for ApiError {
@@ -439,6 +472,36 @@ mod tests {
         assert!(!e.is_retryable());
         assert!(e.user_message().contains("Settings"));
         assert!(ApiError::Transport("x".into()).is_retryable());
+    }
+
+    #[test]
+    fn daily_quota_is_not_retried() {
+        assert_eq!(
+            retry_hint_secs("Please retry in 22h30.633346646s."),
+            Some(79230)
+        );
+        assert_eq!(retry_hint_secs("Please retry in 28.5s"), Some(28));
+        assert_eq!(retry_hint_secs("Please retry in 1m5s"), Some(65));
+        assert_eq!(retry_hint_secs("no hint here"), None);
+        let daily = ApiError::Http {
+            status: 429,
+            message: "You exceeded your current quota. Please retry in 22h30.6s.".into(),
+            retry_after: None,
+        };
+        assert!(!daily.is_retryable());
+        assert!(daily.user_message().contains("another AI service"));
+        let short = ApiError::Http {
+            status: 429,
+            message: "Resource exhausted. Please retry in 28s".into(),
+            retry_after: None,
+        };
+        assert!(short.is_retryable());
+        let plain = ApiError::Http {
+            status: 429,
+            message: "Too many requests".into(),
+            retry_after: None,
+        };
+        assert!(plain.is_retryable());
     }
 
     #[test]

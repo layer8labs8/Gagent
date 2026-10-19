@@ -28,7 +28,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Python 3, a C compiler, git and common command line tools. Node.js and g++ are optional (see above).
 RUN set -eux; \
     packages="bash ca-certificates curl file git gcc jq libc6-dev make patch procps \
-              python3 python3-pip python3-venv unzip xz-utils zip"; \
+              python3 python3-pip python3-venv python-is-python3 unzip xz-utils zip"; \
     if [ "$WITH_CPP" = "1" ]; then packages="$packages g++"; fi; \
     if [ "$WITH_NODE" = "1" ]; then packages="$packages nodejs npm"; fi; \
     apt-get update; \

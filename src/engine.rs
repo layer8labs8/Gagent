@@ -11,13 +11,16 @@ use serde_json::Value;
 
 use crate::agent::{self, AgentConfig, AgentEvent, TurnEnd, TurnResult};
 use crate::config::{AppDirs, Settings};
-use crate::drive::CloudStore;
-use crate::gemini::GeminiClient;
 use crate::prompt::{system_prompt, PromptInfo};
-use crate::sandbox::{docker_status, DockerSandbox, Progress, Sandbox};
+use crate::host::HostSandbox;
+use crate::permission::Approvals;
+use crate::sandbox::{
+    docker_status, resolve_backend, Backend, DockerSandbox, Progress, Sandbox,
+};
 use crate::shadow::{ApplyReport, Change, Shadow, SyncReport};
 use crate::tools::ToolContext;
 use crate::workspace::{WalkOptions, Workspace};
+use crate::wsl::WslSandbox;
 
 /// Everything needed to work on one project in one session.
 pub struct Engine {
@@ -25,8 +28,13 @@ pub struct Engine {
     pub settings: Settings,
     pub session_id: String,
     pub shadow: Arc<Mutex<Shadow>>,
-    pub docker: Arc<DockerSandbox>,
-    pub cloud: Option<Arc<dyn CloudStore>>,
+    /// Runs the agent's commands: a Docker container or WSL Ubuntu.
+    pub sandbox: Arc<dyn Sandbox>,
+    pub backend: Backend,
+    /// What the sandbox has installed, learned by the first command of the session.
+    pub tools_note: Arc<Mutex<Option<String>>>,
+    /// Questions for the user ("may I install this?"). The app shares one between sessions.
+    pub approvals: Arc<Approvals>,
 }
 
 /// What happened after a message was processed.
@@ -44,24 +52,35 @@ impl Engine {
         project: &Path,
         session_id: &str,
         progress: Progress,
-        cloud: Option<Arc<dyn CloudStore>>,
     ) -> Result<Engine> {
         let opts = walk_options(settings);
         let shadow = Shadow::open(project, &dirs.shadow_dir(session_id), opts)?;
-        let docker = Arc::new(DockerSandbox::new(
-            settings.sandbox.clone(),
-            shadow.work_dir(),
-            session_id,
-            progress,
-        ));
+        let backend = resolve_backend(&settings.sandbox);
+        let sandbox: Arc<dyn Sandbox> = match &backend {
+            Backend::Docker => Arc::new(DockerSandbox::new(
+                settings.sandbox.clone(),
+                shadow.work_dir(),
+                session_id,
+                progress,
+            )),
+            Backend::Wsl(distro) => Arc::new(WslSandbox::new(distro, shadow.work_dir())),
+            Backend::Host(shell) => Arc::new(HostSandbox::new(shell, shadow.work_dir())),
+        };
         Ok(Engine {
             dirs: dirs.clone(),
             settings: settings.clone(),
             session_id: session_id.to_string(),
             shadow: Arc::new(Mutex::new(shadow)),
-            docker,
-            cloud,
+            sandbox,
+            backend,
+            tools_note: Default::default(),
+            approvals: Arc::new(Approvals::new(settings.permission)),
         })
+    }
+
+    /// Uses `approvals` (shared with the app, which shows the questions) from now on.
+    pub fn set_approvals(&mut self, approvals: Arc<Approvals>) {
+        self.approvals = approvals;
     }
 
     pub fn walk_options(&self) -> WalkOptions {
@@ -116,14 +135,16 @@ impl Engine {
 
     pub fn tool_context(&self, cancel: Arc<AtomicBool>) -> Result<ToolContext> {
         let work = Workspace::new(self.work_dir())?;
-        let sandbox: Arc<dyn Sandbox> = self.docker.clone();
         Ok(ToolContext {
             work,
-            sandbox,
-            cloud: self.cloud.clone(),
+            sandbox: self.sandbox.clone(),
             opts: self.walk_options(),
             default_timeout_secs: self.settings.sandbox.command_timeout_secs,
             cancel,
+            check: self.settings.auto_check,
+            tools_note: self.tools_note.clone(),
+            approvals: self.approvals.clone(),
+            reads: Default::default(),
         })
     }
 
@@ -137,9 +158,8 @@ impl Engine {
         emit: &dyn Fn(AgentEvent),
         cancel: &Arc<AtomicBool>,
     ) -> Result<MessageOutcome> {
-        let key = self.settings.effective_api_key();
-        if key.is_empty() {
-            bail!("No Gemini API key is set. Open Settings and paste your key (get one at https://aistudio.google.com/apikey).");
+        if !self.settings.is_configured() {
+            bail!("{}", self.settings.setup_hint());
         }
 
         emit(AgentEvent::Status("Syncing project...".into()));
@@ -153,25 +173,48 @@ impl Engine {
         }
 
         let ctx = self.tool_context(cancel.clone())?;
-        let sandbox_ready = docker_status(&self.settings.sandbox.image).is_ready();
+        let (sandbox_ready, wsl, host) = match &self.backend {
+            Backend::Docker => (
+                docker_status(&self.settings.sandbox.image).is_ready(),
+                false,
+                false,
+            ),
+            Backend::Wsl(distro) => (crate::wsl::wsl_status(distro).is_ok(), true, false),
+            Backend::Host(shell) => (shell.is_file(), false, true),
+        };
+        let tools = self
+            .tools_note
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_default();
         let prompt = system_prompt(&PromptInfo {
+            model: self.settings.active_model(),
             workspace: &ctx.work,
             opts: ctx.opts,
-            drive: ctx.cloud.is_some(),
             network: self.settings.sandbox.network,
             sandbox_available: sandbox_ready,
+            wsl,
+            host,
+            tools: &tools,
         });
         let cfg = AgentConfig {
-            model: self.settings.model.clone(),
+            model: self.settings.active_model().to_string(),
             max_steps: self.settings.max_steps,
+            token_budget: self.settings.max_task_tokens,
             system_prompt: prompt,
             retry_base_delay: Duration::from_secs(2),
         };
-        let client = Arc::new(GeminiClient::new(&key, &self.settings.gemini_base_url()));
+        let client = crate::llm::make_client(&self.settings);
         let turn = agent::run_turn(&client, &cfg, history, text, &ctx, emit, cancel);
 
         let mut auto_applied = None;
-        if self.settings.auto_apply && matches!(turn.end, TurnEnd::Finished | TurnEnd::StepLimit) {
+        if self.settings.auto_apply
+            && matches!(
+                turn.end,
+                TurnEnd::Finished | TurnEnd::StepLimit | TurnEnd::TokenLimit
+            )
+        {
             let report = self.apply_all()?;
             if !report.applied.is_empty() || !report.skipped.is_empty() {
                 auto_applied = Some(report);
@@ -182,7 +225,7 @@ impl Engine {
 
     /// Stops the sandbox container.
     pub fn shutdown(&self) {
-        self.docker.shutdown();
+        let _ = self.sandbox.reset();
     }
 }
 

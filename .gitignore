@@ -8,3 +8,9 @@
 .env.*
 *.log
 settings.json
+
+# Built programs and local work files
+/dist/
+.gagent/
+/EDO_PROMPT.txt
+/ROADMAP_AZ.md

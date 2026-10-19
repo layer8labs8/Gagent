@@ -50,6 +50,8 @@ impl Canned {
 pub struct Received {
     pub url: String,
     pub api_key: String,
+    /// Value of the `Authorization` header (OpenAI-compatible APIs).
+    pub auth: String,
     pub body: Value,
 }
 
@@ -77,9 +79,16 @@ impl MockGemini {
                     .find(|h| h.field.equiv("x-goog-api-key"))
                     .map(|h| h.value.to_string())
                     .unwrap_or_default();
+                let auth = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("authorization"))
+                    .map(|h| h.value.to_string())
+                    .unwrap_or_default();
                 seen.lock().unwrap().push(Received {
                     url: req.url().to_string(),
                     api_key,
+                    auth,
                     body: serde_json::from_str(&body).unwrap_or(Value::Null),
                 });
                 let canned = script

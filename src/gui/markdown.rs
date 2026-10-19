@@ -175,15 +175,15 @@ fn inline_job(text: &str, size: f32, color: Color32, wrap_width: f32, strong: bo
         match style {
             Style::Plain => {
                 if strong {
-                    format.color = theme::TEXT_STRONG;
+                    format.color = theme::text_strong();
                 }
             }
             Style::Code => {
                 format.font_id = FontId::new(size - 1.0, FontFamily::Monospace);
-                format.background = Color32::from_rgb(0x1B, 0x25, 0x38);
-                format.color = Color32::from_rgb(0x7D, 0xE3, 0xF4);
+                format.background = theme::code_bg();
+                format.color = theme::accent();
             }
-            Style::Bold => format.color = theme::TEXT_STRONG,
+            Style::Bold => format.color = theme::text_strong(),
             Style::Italic => format.italics = true,
         }
         job.append(&segment, 0.0, format);
@@ -215,7 +215,7 @@ pub fn render(ui: &mut egui::Ui, text: &str) {
                     _ => 15.0,
                 };
                 ui.add_space(4.0);
-                let job = inline_job(text, size, theme::TEXT_STRONG, ui.available_width(), true);
+                let job = inline_job(text, size, theme::text_strong(), ui.available_width(), true);
                 ui.add(egui::Label::new(job).wrap());
             }
             Block::Bullet {
@@ -225,8 +225,8 @@ pub fn render(ui: &mut egui::Ui, text: &str) {
             } => {
                 ui.horizontal_top(|ui| {
                     ui.add_space(6.0 + indent as f32 * 14.0);
-                    ui.label(RichText::new(marker).color(theme::ACCENT));
-                    let job = inline_job(text, 14.5, theme::TEXT, ui.available_width(), false);
+                    ui.label(RichText::new(marker).color(theme::accent()));
+                    let job = inline_job(text, 14.5, theme::text(), ui.available_width(), false);
                     ui.add(egui::Label::new(job).wrap());
                 });
             }
@@ -234,8 +234,8 @@ pub fn render(ui: &mut egui::Ui, text: &str) {
                 ui.horizontal_top(|ui| {
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(3.0, 18.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 1.0, theme::FAINT);
-                    let job = inline_job(text, 14.5, theme::MUTED, ui.available_width(), false);
+                    ui.painter().rect_filled(rect, 1.0, theme::faint());
+                    let job = inline_job(text, 14.5, theme::muted(), ui.available_width(), false);
                     ui.add(egui::Label::new(job).wrap());
                 });
             }
@@ -243,7 +243,7 @@ pub fn render(ui: &mut egui::Ui, text: &str) {
                 ui.separator();
             }
             Block::Line(text) => {
-                let job = inline_job(text, 14.5, theme::TEXT, ui.available_width(), false);
+                let job = inline_job(text, 14.5, theme::text(), ui.available_width(), false);
                 ui.add(egui::Label::new(job).wrap());
             }
         }
@@ -253,8 +253,8 @@ pub fn render(ui: &mut egui::Ui, text: &str) {
 
 fn code_block(ui: &mut egui::Ui, lang: &str, text: &str) {
     egui::Frame::new()
-        .fill(theme::CODE_BG)
-        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .fill(theme::code_bg())
+        .stroke(egui::Stroke::new(1.0, theme::border()))
         .corner_radius(egui::CornerRadius::same(6))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
@@ -263,7 +263,7 @@ fn code_block(ui: &mut egui::Ui, lang: &str, text: &str) {
                 ui.label(
                     RichText::new(if lang.is_empty() { "code" } else { lang })
                         .small()
-                        .color(theme::FAINT),
+                        .color(theme::faint()),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("Copy").clicked() {
@@ -275,7 +275,7 @@ fn code_block(ui: &mut egui::Ui, lang: &str, text: &str) {
                 .id_salt(text.len() ^ lang.len())
                 .show(ui, |ui| {
                     ui.add(
-                        egui::Label::new(RichText::new(text).monospace().color(theme::TEXT))
+                        egui::Label::new(RichText::new(text).monospace().color(theme::text()))
                             .extend(),
                     );
                 });

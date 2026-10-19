@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use crate::config::SandboxSettings;
+use crate::config::{SandboxBackend, SandboxSettings};
 use crate::util::{strip_ansi, unique_id};
 use crate::workspace::{Workspace, SANDBOX_MOUNT};
 
@@ -62,6 +62,11 @@ pub trait Sandbox: Send + Sync {
     fn exec(&self, req: &ExecRequest, cancel: &AtomicBool) -> Result<ExecResult>;
     /// Throws away the running environment (installed packages, processes).
     fn reset(&self) -> Result<()>;
+    /// True when commands run directly on the user's computer, so that
+    /// [`crate::policy::check`] must look at them first.
+    fn needs_policy(&self) -> bool {
+        false
+    }
 }
 
 /// Receives human-readable progress lines (image build output and so on).
@@ -78,11 +83,46 @@ pub enum DockerStatus {
     NotInstalled,
     /// Docker is installed but the engine does not answer.
     NotRunning(String),
+    /// Commands run in a WSL Ubuntu distribution instead of Docker.
+    Wsl {
+        distro: String,
+        /// `python3` exists in the distribution.
+        python: bool,
+    },
+    /// Commands run with bash on this computer.
+    Host {
+        /// Short name of the shell, for display ("Git Bash 5.2.37").
+        shell: String,
+    },
 }
 
 impl DockerStatus {
     pub fn is_ready(&self) -> bool {
-        matches!(self, DockerStatus::Ready { .. })
+        matches!(
+            self,
+            DockerStatus::Ready { .. } | DockerStatus::Wsl { .. } | DockerStatus::Host { .. }
+        )
+    }
+
+    /// True when commands run directly on this computer.
+    pub fn is_host(&self) -> bool {
+        matches!(self, DockerStatus::Host { .. })
+    }
+
+    /// True when commands run in WSL.
+    pub fn is_wsl(&self) -> bool {
+        matches!(self, DockerStatus::Wsl { .. })
+    }
+
+    /// Few words for the status line in the sidebar.
+    pub fn short_label(&self) -> String {
+        match self {
+            DockerStatus::Ready { .. } => "Docker ready".into(),
+            DockerStatus::Wsl { distro, .. } => format!("WSL {distro} ready"),
+            DockerStatus::Host { .. } => "this computer".into(),
+            DockerStatus::NotInstalled => "nothing to run code in".into(),
+            DockerStatus::NotRunning(_) => "not running".into(),
+        }
     }
 
     /// One line for the UI.
@@ -100,16 +140,94 @@ impl DockerStatus {
             DockerStatus::NotRunning(why) => {
                 format!("Docker is installed but not running: {why}")
             }
+            DockerStatus::Wsl { distro, python } => {
+                let python = if *python {
+                    ""
+                } else {
+                    " Python is not installed there: run `sudo apt install python3` in it."
+                };
+                format!(
+                    "WSL {distro} ready (light, no Docker needed; not isolated from your Windows files).{python}"
+                )
+            }
+            DockerStatus::Host { shell } => format!(
+                "This computer ready ({shell}): no virtual machine, nothing to install. Not isolated, so dangerous commands are refused."
+            ),
         }
     }
 }
 
-/// Name of the docker executable (overridable for tests and Podman users).
+/// The docker executable to run: `GAGENT_DOCKER` if set, otherwise `docker` from
+/// `PATH`, otherwise a well-known install location. Programs started from a
+/// desktop launcher (macOS Finder, a Windows shortcut right after installing
+/// Docker Desktop) often do not have Docker on their `PATH`.
 pub fn docker_binary() -> String {
-    std::env::var("GAGENT_DOCKER")
+    if let Some(v) = std::env::var("GAGENT_DOCKER")
         .ok()
         .filter(|v| !v.is_empty())
+    {
+        return v;
+    }
+    if find_on_path("docker").is_some() {
+        return "docker".into();
+    }
+    known_docker_locations()
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "docker".into())
+}
+
+/// Looks for an executable in the directories of `PATH`.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let candidates: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .flat_map(|dir| {
+            candidates
+                .iter()
+                .map(move |ext| dir.join(format!("{name}{ext}")))
+        })
+        .find(|p| p.is_file())
+}
+
+fn known_docker_locations() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramW6432", "LOCALAPPDATA"] {
+            if let Some(base) = std::env::var_os(var) {
+                let base = PathBuf::from(base);
+                out.push(base.join(r"Docker\Docker\resources\bin\docker.exe"));
+                out.push(base.join(r"Programs\Docker\Docker\resources\bin\docker.exe"));
+            }
+        }
+    } else {
+        for p in [
+            "/usr/local/bin/docker",
+            "/usr/bin/docker",
+            "/opt/homebrew/bin/docker",
+            "/snap/bin/docker",
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+        ] {
+            out.push(PathBuf::from(p));
+        }
+        if let Some(home) = dirs::home_dir() {
+            out.push(home.join(".docker/bin/docker"));
+            out.push(home.join(".rd/bin/docker"));
+        }
+    }
+    out
+}
+
+/// The Dockerfile text with Unix line endings. A checkout with CRLF line
+/// endings (Windows) would otherwise put `\r` into the shell commands.
+fn dockerfile_text() -> String {
+    SANDBOX_DOCKERFILE.replace("\r\n", "\n")
 }
 
 /// Checks whether Docker can be used and whether the sandbox image exists.
@@ -145,6 +263,81 @@ pub fn docker_status(image: &str) -> DockerStatus {
     }
 }
 
+/// Which engine runs the commands, decided from the settings and what is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Backend {
+    Docker,
+    /// WSL with this distribution name (empty: the default one).
+    Wsl(String),
+    /// Bash on this computer: the path of the shell.
+    Host(PathBuf),
+}
+
+/// What is available for running commands, for the status indicator.
+pub fn sandbox_status(settings: &SandboxSettings) -> DockerStatus {
+    choose(settings).1
+}
+
+/// The engine to use now.
+pub fn resolve_backend(settings: &SandboxSettings) -> Backend {
+    choose(settings).0
+}
+
+/// Picks the engine from the setting and what is installed. Nothing is probed that is
+/// not needed: a missing or hanging Docker does not slow down a computer that runs
+/// commands directly.
+///
+/// `Auto` prefers this computer's own bash (fast and light), then Docker, then WSL. A heavy
+/// engine is only used when the user picks it or when nothing else exists.
+fn choose(settings: &SandboxSettings) -> (Backend, DockerStatus) {
+    let docker = || docker_status(&settings.image);
+    let wsl = || crate::wsl::wsl_status(&settings.wsl_distro);
+    let host = || -> Option<(Backend, DockerStatus)> {
+        let shell = crate::host::find_shell()?;
+        let status = crate::host::host_status().ok()?;
+        Some((Backend::Host(shell), status))
+    };
+    let wsl_backend = |status: DockerStatus| (Backend::Wsl(distro_of(&status)), status);
+    match settings.backend {
+        SandboxBackend::Docker => (Backend::Docker, docker()),
+        SandboxBackend::Wsl => match wsl() {
+            Ok(status) => wsl_backend(status),
+            Err(why) => (
+                Backend::Wsl(settings.wsl_distro.clone()),
+                DockerStatus::NotRunning(why),
+            ),
+        },
+        SandboxBackend::Host => match host() {
+            Some(found) => found,
+            None => (
+                Backend::Host(PathBuf::new()),
+                DockerStatus::NotRunning(crate::host::host_status().err().unwrap_or_default()),
+            ),
+        },
+        SandboxBackend::Auto => {
+            if let Some(found) = host() {
+                return found;
+            }
+            let docker = docker();
+            if docker.is_ready() || !cfg!(windows) {
+                return (Backend::Docker, docker);
+            }
+            match wsl() {
+                Ok(status) => wsl_backend(status),
+                // Keep Docker's message: it is the one that tells the user what to install.
+                Err(_) => (Backend::Docker, docker),
+            }
+        }
+    }
+}
+
+fn distro_of(status: &DockerStatus) -> String {
+    match status {
+        DockerStatus::Wsl { distro, .. } => distro.clone(),
+        _ => String::new(),
+    }
+}
+
 fn is_not_found(e: &anyhow::Error) -> bool {
     e.downcast_ref::<std::io::Error>()
         .map(|io| io.kind() == std::io::ErrorKind::NotFound)
@@ -158,8 +351,12 @@ fn first_line(s: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn base_command(program: &str) -> Command {
-    let cmd = Command::new(program);
+pub(crate) fn base_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    // When started from Git Bash / MSYS2 on Windows, arguments such as `/workspace`
+    // would be rewritten into Windows paths before docker sees them.
+    cmd.env("MSYS_NO_PATHCONV", "1")
+        .env("MSYS2_ARG_CONV_EXCL", "*");
     #[cfg(windows)]
     let cmd = {
         use std::os::windows::process::CommandExt;
@@ -171,7 +368,25 @@ fn base_command(program: &str) -> Command {
 }
 
 /// Runs a short command and returns (exit code, stdout, stderr).
-fn run_quick(program: &str, args: &[&str], timeout: Duration) -> Result<(i32, String, String)> {
+pub(crate) fn run_quick(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(i32, String, String)> {
+    let (code, out, err) = run_quick_bytes(program, args, timeout)?;
+    Ok((
+        code,
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&err).into_owned(),
+    ))
+}
+
+/// Like [`run_quick`], but returns the raw bytes (`wsl.exe` prints UTF-16).
+pub(crate) fn run_quick_bytes(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(i32, Vec<u8>, Vec<u8>)> {
     let mut cmd = base_command(program);
     cmd.args(args)
         .stdin(Stdio::null())
@@ -203,24 +418,24 @@ fn run_quick(program: &str, args: &[&str], timeout: Duration) -> Result<(i32, St
     Ok((status.code().unwrap_or(-1), stdout, stderr))
 }
 
-fn read_all(pipe: Option<impl Read>) -> String {
+fn read_all(pipe: Option<impl Read>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(mut p) = pipe {
         let _ = p.read_to_end(&mut buf);
     }
-    String::from_utf8_lossy(&buf).into_owned()
+    buf
 }
 
 /// Keeps the start and the end of a long output stream.
 #[derive(Default)]
-struct Capture {
+pub(crate) struct Capture {
     head: Vec<u8>,
     tail: VecDeque<u8>,
     dropped: usize,
 }
 
 impl Capture {
-    fn push(&mut self, data: &[u8]) {
+    pub(crate) fn push(&mut self, data: &[u8]) {
         let mut data = data;
         if self.head.len() < CAPTURE_HEAD_BYTES {
             let take = (CAPTURE_HEAD_BYTES - self.head.len()).min(data.len());
@@ -237,7 +452,7 @@ impl Capture {
         }
     }
 
-    fn finish(self) -> (String, bool) {
+    pub(crate) fn finish(self) -> (String, bool) {
         let mut bytes = self.head;
         let truncated = self.dropped > 0;
         if truncated {
@@ -393,7 +608,10 @@ impl DockerSandbox {
             args.push("none".into());
         }
         args.push("-v".into());
-        args.push(format!("{}:{SANDBOX_MOUNT}", work.display()));
+        // `:z` lets the container write to the folder on Linux hosts that enforce
+        // SELinux (Fedora, RHEL); other hosts ignore it.
+        let label = if cfg!(target_os = "linux") { ":z" } else { "" };
+        args.push(format!("{}:{SANDBOX_MOUNT}{label}", work.display()));
         args.push("-w".into());
         args.push(SANDBOX_MOUNT.into());
         for (k, v) in container_env() {
@@ -522,7 +740,10 @@ impl Sandbox for DockerSandbox {
     }
 }
 
-fn pump(mut pipe: Box<dyn Read + Send>, capture: Arc<Mutex<Capture>>) -> thread::JoinHandle<()> {
+pub(crate) fn pump(
+    mut pipe: Box<dyn Read + Send>,
+    capture: Arc<Mutex<Capture>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 8192];
         loop {
@@ -537,16 +758,22 @@ fn pump(mut pipe: Box<dyn Read + Send>, capture: Arc<Mutex<Capture>>) -> thread:
     })
 }
 
-fn kill_child(child: &mut Child) {
+pub(crate) fn kill_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
 
 /// Environment variables set inside the container.
 fn container_env() -> Vec<(&'static str, String)> {
-    let home = format!("{SANDBOX_MOUNT}/.gagent/home");
+    container_env_for(&format!("{SANDBOX_MOUNT}/.gagent/home"))
+}
+
+/// The environment of sandboxed commands, with `home` as the home directory.
+pub(crate) fn container_env_for(home: &str) -> Vec<(&'static str, String)> {
+    let home = home.to_string();
     vec![
         ("HOME", home.clone()),
+        ("LANG", "C.UTF-8".into()),
         ("USER", "agent".into()),
         ("LOGNAME", "agent".into()),
         ("TERM", "dumb".into()),
@@ -594,8 +821,23 @@ fn host_user() -> Option<(u32, u32)> {
 
 /// Builds the sandbox image from the embedded Dockerfile, streaming output to `progress`.
 pub fn build_image(docker: &str, image: &str, progress: &Progress) -> Result<()> {
+    match build_image_once(docker, image, progress, true) {
+        // Docker without the buildx plugin (the `docker.io` package of Ubuntu and Debian)
+        // does not know `--progress`; its classic builder prints plain output anyway.
+        Err(e) if e.to_string().contains("unknown flag: --progress") => {
+            build_image_once(docker, image, progress, false)
+        }
+        other => other,
+    }
+}
+
+fn build_image_once(docker: &str, image: &str, progress: &Progress, plain: bool) -> Result<()> {
     let mut cmd = base_command(docker);
-    cmd.args(["build", "--progress=plain", "-t", image]);
+    cmd.arg("build");
+    if plain {
+        cmd.arg("--progress=plain");
+    }
+    cmd.args(["-t", image]);
     if let Ok(base) = std::env::var("GAGENT_SANDBOX_BASE_IMAGE") {
         if !base.trim().is_empty() {
             cmd.args(["--build-arg", &format!("BASE_IMAGE={}", base.trim())]);
@@ -613,7 +855,7 @@ pub fn build_image(docker: &str, image: &str, progress: &Progress) -> Result<()>
         }
     })?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(SANDBOX_DOCKERFILE.as_bytes())?;
+        stdin.write_all(dockerfile_text().as_bytes())?;
     }
     let tail = Arc::new(Mutex::new(VecDeque::<String>::new()));
     let mut handles = Vec::new();
@@ -701,6 +943,7 @@ impl Sandbox for UnavailableSandbox {
 pub struct ScriptedSandbox {
     results: Mutex<VecDeque<ExecResult>>,
     pub commands: Mutex<Vec<String>>,
+    policy: bool,
 }
 
 impl ScriptedSandbox {
@@ -708,11 +951,22 @@ impl ScriptedSandbox {
         Self {
             results: Mutex::new(results.into()),
             commands: Mutex::new(Vec::new()),
+            policy: false,
         }
+    }
+
+    /// Behaves like a sandbox that runs on the user's own computer: commands are checked first.
+    pub fn with_policy(mut self) -> Self {
+        self.policy = true;
+        self
     }
 }
 
 impl Sandbox for ScriptedSandbox {
+    fn needs_policy(&self) -> bool {
+        self.policy
+    }
+
     fn exec(&self, req: &ExecRequest, _cancel: &AtomicBool) -> Result<ExecResult> {
         self.commands.lock().unwrap().push(req.command.clone());
         self.results

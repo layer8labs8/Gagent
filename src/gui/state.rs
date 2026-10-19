@@ -8,7 +8,6 @@ use std::time::Instant;
 use serde_json::Value;
 
 use crate::agent::{AgentEvent, TurnEnd};
-use crate::drive::{DeviceCode, DriveClient, RemoteFile};
 use crate::engine::Engine;
 use crate::gemini::Usage;
 use crate::sandbox::{DockerStatus, ExecResult};
@@ -19,10 +18,8 @@ use crate::util::now_secs;
 /// Tabs of the right-hand panel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
-    Activity,
     Changes,
     Sandbox,
-    Drive,
 }
 
 /// A message shown briefly at the bottom of the window.
@@ -191,72 +188,6 @@ pub struct TurnSummary {
     pub usage: Usage,
 }
 
-pub struct ConnectState {
-    pub code: Option<DeviceCode>,
-    pub cancel: Arc<AtomicBool>,
-}
-
-pub struct DriveState {
-    pub client: Option<Arc<DriveClient>>,
-    pub account: Option<String>,
-    pub connecting: Option<ConnectState>,
-    pub cwd: String,
-    pub entries: Vec<RemoteFile>,
-    pub loading: bool,
-    pub error: Option<String>,
-    pub job: Option<String>,
-    pub job_status: String,
-    pub job_cancel: Arc<AtomicBool>,
-    pub last_result: Option<(bool, String)>,
-}
-
-impl Default for DriveState {
-    fn default() -> Self {
-        Self {
-            client: None,
-            account: None,
-            connecting: None,
-            cwd: String::new(),
-            entries: Vec::new(),
-            loading: false,
-            error: None,
-            job: None,
-            job_status: String::new(),
-            job_cancel: Arc::new(AtomicBool::new(false)),
-            last_result: None,
-        }
-    }
-}
-
-/// Bulk Drive operations started from the Drive tab.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DriveJobKind {
-    UploadProject,
-    DownloadProject,
-    BackupSessions,
-    RestoreSessions,
-    DownloadFile(String),
-}
-
-impl DriveJobKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            DriveJobKind::UploadProject => "Upload project",
-            DriveJobKind::DownloadProject => "Download project",
-            DriveJobKind::BackupSessions => "Back up sessions",
-            DriveJobKind::RestoreSessions => "Restore sessions",
-            DriveJobKind::DownloadFile(_) => "Download file",
-        }
-    }
-
-    pub fn needs_project(&self) -> bool {
-        !matches!(
-            self,
-            DriveJobKind::BackupSessions | DriveJobKind::RestoreSessions
-        )
-    }
-}
-
 /// Results from worker threads.
 pub enum Msg {
     EngineReady {
@@ -294,18 +225,6 @@ pub enum Msg {
         session: String,
         command: String,
         result: Result<ExecResult, String>,
-    },
-    DriveCode(DeviceCode),
-    DriveConnected(Result<String, String>),
-    DriveAccount(Option<String>),
-    DriveEntries {
-        dir: String,
-        result: Result<Vec<RemoteFile>, String>,
-    },
-    DriveProgress(String),
-    DriveJob {
-        label: String,
-        result: Result<String, String>,
     },
     Info(String),
 }

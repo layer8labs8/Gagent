@@ -1,0 +1,4 @@
+# Link the C runtime statically on Windows (MSVC) so gagent.exe runs on a clean
+# machine without the "Microsoft Visual C++ Redistributable" installed.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

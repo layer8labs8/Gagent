@@ -1,36 +1,33 @@
-//! The right-hand panel (activity, changes, sandbox, drive) and the settings window.
+//! The right-hand panel (changes, sandbox terminal) and the settings window.
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Key, Layout, Margin, Panel, RichText, Stroke, Vec2,
+    self, Align, CornerRadius, Frame, Key, Layout, Margin, Panel, RichText, Stroke, Vec2,
 };
 
 use super::state::*;
 use super::theme;
 use super::views::{heading_label, plain_button, primary_button, status_dot};
 use super::GagentApp;
-use crate::drive::RemoteFile;
 use crate::shadow::ChangeKind;
-use crate::util::{format_clock, format_local, human_bytes, truncate_end};
+use crate::util::{format_local, human_bytes, truncate_end};
 
 pub fn side_panel(app: &mut GagentApp, ui: &mut egui::Ui) {
     Panel::right("side_panel")
-        .default_size(430.0)
+        .default_size(420.0)
         .size_range(340.0..=780.0)
         .resizable(true)
         .frame(
             Frame::new()
-                .fill(theme::PANEL_BG)
-                .stroke(Stroke::new(1.0, theme::BORDER))
-                .inner_margin(Margin::same(12)),
+                .fill(theme::panel_bg())
+                .stroke(Stroke::new(1.0, theme::border()))
+                .inner_margin(Margin::same(14)),
         )
         .show(ui, |ui| {
             tab_bar(app, ui);
             ui.add_space(8.0);
             match app.tab {
-                Tab::Activity => activity_tab(app, ui),
                 Tab::Changes => changes_tab(app, ui),
                 Tab::Sandbox => sandbox_tab(app, ui),
-                Tab::Drive => drive_tab(app, ui),
             }
         });
 }
@@ -39,7 +36,6 @@ fn tab_bar(app: &mut GagentApp, ui: &mut egui::Ui) {
     let pending = app.active().map(|a| a.changes.len()).unwrap_or(0);
     ui.horizontal(|ui| {
         for (tab, label) in [
-            (Tab::Activity, "Activity".to_string()),
             (
                 Tab::Changes,
                 if pending > 0 {
@@ -49,13 +45,12 @@ fn tab_bar(app: &mut GagentApp, ui: &mut egui::Ui) {
                 },
             ),
             (Tab::Sandbox, "Sandbox".to_string()),
-            (Tab::Drive, "Drive".to_string()),
         ] {
             let selected = app.tab == tab;
             let text = RichText::new(label).strong().color(if selected {
-                theme::ACCENT
+                theme::accent()
             } else {
-                theme::MUTED
+                theme::muted()
             });
             let response = ui.add(egui::Button::new(text).frame(false));
             if selected {
@@ -65,7 +60,7 @@ fn tab_bar(app: &mut GagentApp, ui: &mut egui::Ui) {
                         egui::pos2(r.left() + 4.0, r.bottom() + 1.0),
                         egui::pos2(r.right() - 4.0, r.bottom() + 1.0),
                     ],
-                    Stroke::new(2.0, theme::ACCENT),
+                    Stroke::new(2.0, theme::accent()),
                 );
             }
             if response.clicked() {
@@ -73,115 +68,22 @@ fn tab_bar(app: &mut GagentApp, ui: &mut egui::Ui) {
                 if tab == Tab::Changes {
                     app.refresh_changes();
                 }
-                if tab == Tab::Drive && app.drive.client.is_some() && app.drive.entries.is_empty() {
-                    app.drive_refresh();
-                }
                 if tab == Tab::Sandbox && app.docker.is_none() {
                     app.check_docker();
                 }
             }
         }
-    });
-    ui.separator();
-}
-
-// ---------------------------------------------------------------------------
-// Activity
-// ---------------------------------------------------------------------------
-
-fn activity_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
-    let Some(a) = app.active() else {
-        return;
-    };
-    heading_label(ui, "LIVE ACTIVITY");
-    ui.label(
-        RichText::new("Every file operation and sandbox command, as it happens.")
-            .small()
-            .color(theme::FAINT),
-    );
-    if let Some(run) = &a.run {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            theme::spinner(ui, 13.0);
-            ui.label(
-                RichText::new(truncate_end(&run.status, 60))
-                    .small()
-                    .color(theme::MUTED),
-            );
-        });
-    }
-    if let Some(u) = a.last_usage.filter(|u| u.total_tokens > 0) {
-        ui.label(
-            RichText::new(format!(
-                "Last task: {} tokens ({} in, {} out)",
-                u.total_tokens, u.prompt_tokens, u.output_tokens
-            ))
-            .small()
-            .color(theme::FAINT),
-        );
-    }
-    ui.add_space(6.0);
-    if a.log.is_empty() {
-        ui.label(
-            RichText::new("Nothing yet. Activity appears here while the agent works.")
-                .color(theme::FAINT),
-        );
-        return;
-    }
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            for (i, entry) in a.log.iter().enumerate() {
-                match entry.kind {
-                    LogKind::Output => {
-                        Frame::new()
-                            .fill(theme::CODE_BG)
-                            .corner_radius(CornerRadius::same(6))
-                            .inner_margin(Margin::same(6))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                egui::ScrollArea::both()
-                                    .id_salt(("log_out", i))
-                                    .max_height(180.0)
-                                    .show(ui, |ui| {
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&entry.text)
-                                                    .monospace()
-                                                    .size(12.0)
-                                                    .color(theme::MUTED),
-                                            )
-                                            .extend(),
-                                        );
-                                    });
-                            });
-                    }
-                    kind => {
-                        let color = match kind {
-                            LogKind::Good => theme::OK,
-                            LogKind::Bad => theme::ERR,
-                            LogKind::Tool => theme::TEXT,
-                            _ => theme::MUTED,
-                        };
-                        ui.horizontal_top(|ui| {
-                            ui.label(
-                                RichText::new(format_clock(entry.time))
-                                    .monospace()
-                                    .size(11.5)
-                                    .color(theme::FAINT),
-                            );
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&entry.text).size(13.0).color(color),
-                                )
-                                .wrap(),
-                            );
-                        });
-                    }
-                }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui
+                .add(egui::Button::new("×").frame(false))
+                .on_hover_text("Close this panel")
+                .clicked()
+            {
+                app.right_open = false;
             }
         });
+    });
+    ui.separator();
 }
 
 // ---------------------------------------------------------------------------
@@ -193,7 +95,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         return;
     };
     if !matches!(a.engine, EngineState::Ready(_)) {
-        ui.label(RichText::new("The workspace is not ready yet.").color(theme::FAINT));
+        ui.label(RichText::new("The workspace is not ready yet.").color(theme::faint()));
         return;
     }
     let changes = a.changes.clone();
@@ -216,13 +118,13 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
     let mut refresh = false;
     let mut auto = app.settings.auto_apply;
 
-    heading_label(ui, "PENDING CHANGES");
+    heading_label(ui, "Pending changes");
     ui.label(
         RichText::new(
             "The agent works on a private copy. Nothing reaches your project until you apply it.",
         )
         .small()
-        .color(theme::FAINT),
+        .color(theme::faint()),
     );
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -244,9 +146,9 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
                 egui::Button::new(
                     RichText::new("Apply all")
                         .strong()
-                        .color(Color32::from_rgb(0x03, 0x1B, 0x24)),
+                        .color(theme::on_accent()),
                 )
-                .fill(theme::ACCENT),
+                .fill(theme::accent()),
             )
             .clicked()
         {
@@ -272,7 +174,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
                 have && !running,
-                egui::Button::new(RichText::new(label).color(theme::ERR)),
+                egui::Button::new(RichText::new(label).color(theme::err())),
             )
             .clicked()
         {
@@ -285,7 +187,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
                 !selected.is_empty() && !running,
-                egui::Button::new(RichText::new("Discard selected").color(theme::ERR)),
+                egui::Button::new(RichText::new("Discard selected").color(theme::err())),
             )
             .clicked()
         {
@@ -294,7 +196,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
     });
     ui.add_space(6.0);
     if let Some(e) = &error {
-        ui.label(RichText::new(e).color(theme::ERR));
+        ui.label(RichText::new(e).color(theme::err()));
     }
 
     let list_height = if diff_for.is_some() { 170.0 } else { 300.0 };
@@ -302,7 +204,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         ui.add_space(10.0);
         ui.label(
             RichText::new("No pending changes. The agent's copy matches your project.")
-                .color(theme::FAINT),
+                .color(theme::faint()),
         );
     } else {
         egui::ScrollArea::vertical()
@@ -317,16 +219,20 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
                             toggle = Some(c.rel.clone());
                         }
                         let (letter, color) = match c.kind {
-                            ChangeKind::Added => ("A", theme::OK),
-                            ChangeKind::Modified => ("M", theme::WARN),
-                            ChangeKind::Deleted => ("D", theme::ERR),
+                            ChangeKind::Added => ("A", theme::ok()),
+                            ChangeKind::Modified => ("M", theme::warn()),
+                            ChangeKind::Deleted => ("D", theme::err()),
                         };
                         ui.label(RichText::new(letter).monospace().strong().color(color));
                         let is_open = diff_for.as_deref() == Some(c.rel.as_str());
                         let text = RichText::new(truncate_end(&c.rel, 48))
                             .monospace()
                             .size(13.0)
-                            .color(if is_open { theme::ACCENT } else { theme::TEXT });
+                            .color(if is_open {
+                                theme::accent()
+                            } else {
+                                theme::text()
+                            });
                         if ui
                             .add(egui::Button::new(text).frame(false))
                             .on_hover_text("Show the differences")
@@ -338,7 +244,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
                             ui.label(
                                 RichText::new(human_bytes(c.size))
                                     .small()
-                                    .color(theme::FAINT),
+                                    .color(theme::faint()),
                             );
                         });
                     });
@@ -353,7 +259,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
             RichText::new(rel)
                 .monospace()
                 .strong()
-                .color(theme::TEXT_STRONG),
+                .color(theme::text_strong()),
         );
         egui::ScrollArea::both()
             .id_salt("diff_view")
@@ -362,15 +268,15 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
             .show(ui, |ui| {
                 for line in diff_text.lines() {
                     let color = if line.starts_with("+++") || line.starts_with("---") {
-                        theme::MUTED
+                        theme::muted()
                     } else if line.starts_with('+') {
-                        theme::OK
+                        theme::ok()
                     } else if line.starts_with('-') {
-                        theme::ERR
+                        theme::err()
                     } else if line.starts_with("@@") {
-                        theme::ACCENT
+                        theme::accent()
                     } else {
-                        theme::MUTED
+                        theme::muted()
                     };
                     ui.add(
                         egui::Label::new(RichText::new(line).monospace().size(12.5).color(color))
@@ -383,7 +289,7 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
     if !backups.is_empty() {
         ui.add_space(6.0);
         ui.separator();
-        heading_label(ui, "UNDO");
+        heading_label(ui, "Undo");
         for b in backups.iter().take(3) {
             let label = format!(
                 "Undo the apply from {} ({} file(s))",
@@ -465,20 +371,28 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
 // ---------------------------------------------------------------------------
 
 fn sandbox_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
-    heading_label(ui, "SANDBOX");
+    heading_label(ui, "Sandbox");
+    let wsl = app.docker.as_ref().is_some_and(|s| s.is_wsl());
+    let host = app.docker.as_ref().is_some_and(|s| s.is_host());
     ui.label(
-        RichText::new("Code runs in an isolated Ubuntu container: no root, no host files except the agent's private copy.")
-            .small()
-            .color(theme::FAINT),
+        RichText::new(if host {
+            "Code runs directly on your computer, in the agent's private copy, at low priority. No virtual machine and nothing to install, so it is fast and light. It is not isolated: commands that reach outside the private copy, sudo, shutdown or killing programs are refused."
+        } else if wsl {
+            "Code runs in your WSL Ubuntu, in the agent's private copy. It is light on memory and disk, but not isolated from your Windows files."
+        } else {
+            "Code runs in an isolated Ubuntu container: no root, no host files except the agent's private copy."
+        })
+        .small()
+        .color(theme::faint()),
     );
     ui.add_space(6.0);
 
     let status = app.docker.clone();
     match &status {
-        None => status_dot(ui, theme::FAINT, "Checking Docker..."),
-        Some(s) if s.is_ready() => status_dot(ui, theme::OK, &s.describe()),
+        None => status_dot(ui, theme::faint(), "Checking the sandbox..."),
+        Some(s) if s.is_ready() => status_dot(ui, theme::ok(), &s.describe()),
         Some(s) => {
-            ui.label(RichText::new(s.describe()).color(theme::WARN));
+            ui.label(RichText::new(s.describe()).color(theme::warn()));
         }
     }
     ui.add_space(4.0);
@@ -491,16 +405,26 @@ fn sandbox_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         } else {
             "Build / rebuild image"
         };
-        if ui
-            .add_enabled(!app.building_image, egui::Button::new(build_label))
-            .clicked()
+        if !wsl
+            && !host
+            && ui
+                .add_enabled(!app.building_image, egui::Button::new(build_label))
+                .clicked()
         {
             app.build_image();
         }
         if app.building_image {
             theme::spinner(ui, 13.0);
         }
-        if plain_button(ui, "Reset container")
+        if !host
+            && plain_button(
+                ui,
+                if wsl {
+                    "Stop running commands"
+                } else {
+                    "Reset container"
+                },
+            )
             .on_hover_text("Stops and removes the container; it starts again on the next command")
             .clicked()
         {
@@ -508,63 +432,78 @@ fn sandbox_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
         }
     });
     ui.add_space(4.0);
-    let mut network = app.settings.sandbox.network;
-    if ui
-        .checkbox(
-            &mut network,
-            "Allow network access (pip/npm installs, downloads)",
-        )
-        .changed()
-    {
-        let mut s = app.settings.clone();
-        s.sandbox.network = network;
-        app.commit_settings(s);
+    if !wsl && !host {
+        let mut network = app.settings.sandbox.network;
+        if ui
+            .checkbox(
+                &mut network,
+                "Allow network access (pip/npm installs, downloads)",
+            )
+            .changed()
+        {
+            let mut s = app.settings.clone();
+            s.sandbox.network = network;
+            app.commit_settings(s);
+        }
+        ui.label(
+            RichText::new(format!(
+                "Limits: {} MB memory, {} CPU(s), {} s per command. Change them in Settings.",
+                app.settings.sandbox.memory_mb,
+                app.settings.sandbox.cpus,
+                app.settings.sandbox.command_timeout_secs
+            ))
+            .small()
+            .color(theme::faint()),
+        );
+    } else {
+        ui.label(
+            RichText::new(format!(
+                "{} s per command. Network, memory and CPU limits do not apply here.",
+                app.settings.sandbox.command_timeout_secs
+            ))
+            .small()
+            .color(theme::faint()),
+        );
     }
-    ui.label(
-        RichText::new(format!(
-            "Limits: {} MB memory, {} CPU(s), {} s per command. Change them in Settings.",
-            app.settings.sandbox.memory_mb,
-            app.settings.sandbox.cpus,
-            app.settings.sandbox.command_timeout_secs
-        ))
-        .small()
-        .color(theme::FAINT),
-    );
 
     if !app.sandbox_log.is_empty() {
         ui.add_space(6.0);
-        egui::CollapsingHeader::new(RichText::new("Image build log").small().color(theme::MUTED))
-            .default_open(app.building_image)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("image_log")
-                    .max_height(140.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &app.sandbox_log {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(line)
-                                        .monospace()
-                                        .size(11.5)
-                                        .color(theme::MUTED),
-                                )
-                                .extend(),
-                            );
-                        }
-                    });
-            });
+        egui::CollapsingHeader::new(
+            RichText::new("Image build log")
+                .small()
+                .color(theme::muted()),
+        )
+        .default_open(app.building_image)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("image_log")
+                .max_height(140.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    for line in &app.sandbox_log {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(line)
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(theme::muted()),
+                            )
+                            .extend(),
+                        );
+                    }
+                });
+        });
     }
 
     ui.add_space(8.0);
     ui.separator();
-    heading_label(ui, "RUN A COMMAND");
+    heading_label(ui, "Run a command");
     ui.label(
         RichText::new(
             "Runs in the same sandbox the agent uses, in the agent's copy of your project.",
         )
         .small()
-        .color(theme::FAINT),
+        .color(theme::faint()),
     );
     terminal(app, ui);
 }
@@ -595,7 +534,7 @@ fn terminal(app: &mut GagentApp, ui: &mut egui::Ui) {
         if a.terminal.busy {
             ui.horizontal(|ui| {
                 theme::spinner(ui, 13.0);
-                ui.label(RichText::new("Running...").small().color(theme::MUTED));
+                ui.label(RichText::new("Running...").small().color(theme::muted()));
             });
         }
         if !a.terminal.entries.is_empty() && plain_button(ui, "Clear output").clicked() {
@@ -614,7 +553,7 @@ fn terminal(app: &mut GagentApp, ui: &mut egui::Ui) {
                             RichText::new(format!("$ {}", entry.command))
                                 .monospace()
                                 .size(12.5)
-                                .color(theme::ACCENT),
+                                .color(theme::accent()),
                         )
                         .extend(),
                     );
@@ -624,16 +563,16 @@ fn terminal(app: &mut GagentApp, ui: &mut egui::Ui) {
                                 RichText::new(truncate_end(&entry.output, 20_000))
                                     .monospace()
                                     .size(12.0)
-                                    .color(theme::TEXT),
+                                    .color(theme::text()),
                             )
                             .extend(),
                         );
                     }
                     ui.add(egui::Label::new(
                         RichText::new(&entry.status).small().color(if entry.ok {
-                            theme::OK
+                            theme::ok()
                         } else {
-                            theme::ERR
+                            theme::err()
                         }),
                     ));
                     ui.add_space(6.0);
@@ -649,303 +588,6 @@ fn terminal(app: &mut GagentApp, ui: &mut egui::Ui) {
     if let Some(cmd) = run {
         app.run_in_sandbox(cmd);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Drive
-// ---------------------------------------------------------------------------
-
-fn drive_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
-    heading_label(ui, "GOOGLE DRIVE");
-    ui.label(
-        RichText::new("Keep project files and chat sessions in your own Drive. Gagent only sees the folder it creates.")
-            .small()
-            .color(theme::FAINT),
-    );
-    ui.add_space(8.0);
-
-    if app.drive.client.is_none() {
-        drive_connect_view(app, ui);
-        return;
-    }
-
-    let account = app
-        .drive
-        .account
-        .clone()
-        .unwrap_or_else(|| "connected".into());
-    ui.horizontal(|ui| {
-        status_dot(ui, theme::OK, &format!("Connected: {account}"));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if plain_button(ui, "Disconnect").clicked() {
-                app.drive_disconnect();
-            }
-        });
-    });
-    ui.label(
-        RichText::new(format!("Drive folder: {}", app.settings.drive.folder()))
-            .small()
-            .color(theme::FAINT),
-    );
-    ui.add_space(6.0);
-
-    let busy = app.drive.job.is_some();
-    let has_project = app
-        .active()
-        .map(|a| matches!(a.engine, EngineState::Ready(_)))
-        .unwrap_or(false);
-    let mut job: Option<DriveJobKind> = None;
-    ui.horizontal_wrapped(|ui| {
-        if ui
-            .add_enabled(!busy && has_project, egui::Button::new("Upload project"))
-            .on_hover_text("Copies your project folder to Drive (only changed files)")
-            .clicked()
-        {
-            job = Some(DriveJobKind::UploadProject);
-        }
-        if ui
-            .add_enabled(!busy && has_project, egui::Button::new("Download project"))
-            .on_hover_text("Brings the Drive copy into the agent's workspace so you can review it")
-            .clicked()
-        {
-            job = Some(DriveJobKind::DownloadProject);
-        }
-        if ui
-            .add_enabled(!busy, egui::Button::new("Back up sessions"))
-            .on_hover_text("Saves your chat sessions to Drive")
-            .clicked()
-        {
-            job = Some(DriveJobKind::BackupSessions);
-        }
-        if ui
-            .add_enabled(!busy, egui::Button::new("Restore sessions"))
-            .on_hover_text("Brings back sessions that are not on this computer")
-            .clicked()
-        {
-            job = Some(DriveJobKind::RestoreSessions);
-        }
-    });
-    if let Some(label) = app.drive.job.clone() {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            theme::spinner(ui, 13.0);
-            ui.label(
-                RichText::new(format!(
-                    "{label}: {}",
-                    truncate_end(&app.drive.job_status, 60)
-                ))
-                .small()
-                .color(theme::MUTED),
-            );
-            if plain_button(ui, "Cancel").clicked() {
-                app.drive
-                    .job_cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        });
-    }
-    if let Some((ok, text)) = &app.drive.last_result {
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(truncate_end(text, 300))
-                .small()
-                .color(if *ok { theme::OK } else { theme::ERR }),
-        );
-    }
-
-    ui.add_space(8.0);
-    ui.separator();
-    heading_label(ui, "BROWSE");
-    let cwd = app.drive.cwd.clone();
-    let mut go: Option<String> = None;
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!cwd.is_empty(), egui::Button::new("Up"))
-            .clicked()
-        {
-            go = Some(
-                cwd.rsplit_once('/')
-                    .map(|(p, _)| p.to_string())
-                    .unwrap_or_default(),
-            );
-        }
-        if plain_button(ui, "Refresh").clicked() {
-            go = Some(cwd.clone());
-        }
-        ui.label(
-            RichText::new(format!(
-                "{} / {}",
-                app.settings.drive.folder(),
-                cwd.replace('/', " / ")
-            ))
-            .small()
-            .color(theme::MUTED),
-        );
-        if app.drive.loading {
-            theme::spinner(ui, 12.0);
-        }
-    });
-    if let Some(e) = &app.drive.error {
-        ui.label(
-            RichText::new(truncate_end(e, 300))
-                .small()
-                .color(theme::ERR),
-        );
-    }
-    let entries: Vec<RemoteFile> = app.drive.entries.clone();
-    if entries.is_empty() && !app.drive.loading && app.drive.error.is_none() {
-        ui.label(
-            RichText::new("This folder is empty.")
-                .small()
-                .color(theme::FAINT),
-        );
-    }
-    egui::ScrollArea::vertical()
-        .id_salt("drive_list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for e in &entries {
-                ui.horizontal(|ui| {
-                    if e.is_dir {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    RichText::new(format!("{}/", e.name)).color(theme::ACCENT),
-                                )
-                                .frame(false),
-                            )
-                            .clicked()
-                        {
-                            go = Some(e.path.clone());
-                        }
-                    } else {
-                        ui.label(RichText::new(&e.name).color(theme::TEXT));
-                        ui.label(
-                            RichText::new(human_bytes(e.size))
-                                .small()
-                                .color(theme::FAINT),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .add_enabled(
-                                    !busy && has_project,
-                                    egui::Button::new(RichText::new("Download").small()),
-                                )
-                                .on_hover_text("Saves it into the workspace under drive/")
-                                .clicked()
-                            {
-                                job = Some(DriveJobKind::DownloadFile(e.path.clone()));
-                            }
-                        });
-                    }
-                });
-            }
-        });
-    if let Some(dir) = go {
-        app.drive_list(&dir);
-    }
-    if let Some(kind) = job {
-        app.drive_job(kind);
-    }
-}
-
-fn drive_connect_view(app: &mut GagentApp, ui: &mut egui::Ui) {
-    if let Some(c) = &app.drive.connecting {
-        match &c.code {
-            None => {
-                ui.horizontal(|ui| {
-                    theme::spinner(ui, 14.0);
-                    ui.label(RichText::new("Contacting Google...").color(theme::MUTED));
-                });
-            }
-            Some(code) => {
-                ui.label(RichText::new("1. Open this page in your browser:").color(theme::TEXT));
-                let url = code.verification_url.clone();
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new(&url).color(theme::ACCENT).underline())
-                            .frame(false),
-                    )
-                    .clicked()
-                {
-                    let _ = opener::open(&url);
-                }
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new("2. Enter this code and approve access:").color(theme::TEXT),
-                );
-                ui.add_space(2.0);
-                Frame::new()
-                    .fill(theme::CODE_BG)
-                    .stroke(Stroke::new(1.0, theme::ACCENT))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(Margin::symmetric(16, 10))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(&code.user_code)
-                                .monospace()
-                                .size(26.0)
-                                .strong()
-                                .color(theme::TEXT_STRONG),
-                        );
-                    });
-                ui.horizontal(|ui| {
-                    if plain_button(ui, "Copy code").clicked() {
-                        ui.ctx().copy_text(code.user_code.clone());
-                    }
-                    if plain_button(ui, "Open page").clicked() {
-                        let _ = opener::open(&url);
-                    }
-                });
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    theme::spinner(ui, 13.0);
-                    ui.label(
-                        RichText::new("Waiting for approval...")
-                            .small()
-                            .color(theme::MUTED),
-                    );
-                });
-            }
-        }
-        ui.add_space(6.0);
-        if plain_button(ui, "Cancel").clicked() {
-            c.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        return;
-    }
-
-    if !app.settings.drive.has_client() {
-        ui.label(
-            RichText::new("Drive needs your own Google OAuth client (free). Steps:")
-                .color(theme::TEXT),
-        );
-        for step in [
-            "1. In Google Cloud Console, create a project and enable the Google Drive API.",
-            "2. Create OAuth credentials of type \"TVs and Limited Input devices\".",
-            "3. Paste the client ID and secret in Settings, then connect here.",
-        ] {
-            ui.label(RichText::new(step).small().color(theme::MUTED));
-        }
-        ui.add_space(8.0);
-        if primary_button(ui, "Open Settings").clicked() {
-            app.draft = Some(app.settings.clone());
-        }
-        return;
-    }
-    ui.label(RichText::new("Not connected.").color(theme::MUTED));
-    ui.add_space(6.0);
-    if primary_button(ui, "Connect Google Drive").clicked() {
-        app.drive_connect();
-    }
-    ui.add_space(4.0);
-    ui.label(
-        RichText::new(
-            "You will get a short code to enter on google.com/device. No local web server is used.",
-        )
-        .small()
-        .color(theme::FAINT),
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -995,7 +637,14 @@ pub fn settings_window(app: &mut GagentApp, ctx: &egui::Context) {
         app.commit_settings(draft);
         app.show_banner("Settings saved.", false);
     } else if cancel || !open {
-        // Discard the draft.
+        // Discard the draft. The model list on screen may belong to another provider.
+        if draft.provider != app.settings.provider {
+            app.models = app.settings.preset_models();
+            app.key_status = None;
+            if app.settings.is_configured() {
+                app.load_models();
+            }
+        }
     } else {
         app.draft = Some(draft);
     }
@@ -1006,8 +655,8 @@ fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     heading_label(ui, title);
     ui.add_space(2.0);
     Frame::new()
-        .fill(theme::CARD_BG)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(theme::card_bg())
+        .stroke(Stroke::new(1.0, theme::border()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
@@ -1022,7 +671,7 @@ fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
             Vec2::new(150.0, 22.0),
             Layout::left_to_right(Align::Center),
             |ui| {
-                ui.label(RichText::new(label).color(theme::MUTED));
+                ui.label(RichText::new(label).color(theme::muted()));
             },
         );
         add(ui);
@@ -1035,12 +684,74 @@ fn settings_form(
     d: &mut crate::config::Settings,
     test_key: &mut bool,
 ) {
-    section(ui, "GEMINI", |ui| {
+    section(ui, "Appearance", |ui| {
+        field(ui, "Theme", |ui| {
+            egui::ComboBox::from_id_salt("settings_appearance")
+                .selected_text(d.appearance.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for a in crate::config::Appearance::ALL {
+                        ui.selectable_value(&mut d.appearance, a, a.label());
+                    }
+                });
+        });
+    });
+
+    section(ui, "AI model", |ui| {
+        let provider = d.provider;
+        field(ui, "Service", |ui| {
+            let mut chosen = provider;
+            egui::ComboBox::from_id_salt("settings_provider")
+                .selected_text(provider.label())
+                .width(260.0)
+                .show_ui(ui, |ui| {
+                    for p in crate::config::Provider::ALL {
+                        ui.selectable_value(&mut chosen, p, p.label());
+                    }
+                });
+            if chosen != provider {
+                d.provider = chosen;
+                app.models = d.preset_models();
+                app.key_status = None;
+            }
+        });
+        let provider = d.provider;
+        let (key, model, base_url): (&mut String, &mut String, Option<&mut String>) = match provider
+        {
+            crate::config::Provider::Gemini => (&mut d.api_key, &mut d.model, None),
+            crate::config::Provider::Nvidia => (
+                &mut d.nvidia.api_key,
+                &mut d.nvidia.model,
+                Some(&mut d.nvidia.base_url),
+            ),
+            crate::config::Provider::Openai => (
+                &mut d.openai.api_key,
+                &mut d.openai.model,
+                Some(&mut d.openai.base_url),
+            ),
+        };
+        if let Some(url) = base_url {
+            field(ui, "Server address", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(url)
+                        .hint_text(if provider == crate::config::Provider::Nvidia {
+                            crate::openai::NVIDIA_BASE_URL
+                        } else {
+                            "http://localhost:11434/v1"
+                        })
+                        .desired_width(300.0),
+                );
+            });
+        }
         field(ui, "API key", |ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut d.api_key)
+                egui::TextEdit::singleline(key)
                     .password(!app.show_key)
-                    .hint_text("AIza...")
+                    .hint_text(match provider {
+                        crate::config::Provider::Gemini => "AIza...",
+                        crate::config::Provider::Nvidia => "nvapi-...",
+                        crate::config::Provider::Openai => "(optional for local servers)",
+                    })
                     .desired_width(260.0),
             );
             ui.checkbox(&mut app.show_key, "Show");
@@ -1067,7 +778,7 @@ fn settings_form(
                     egui::Label::new(
                         RichText::new(truncate_end(text, 200))
                             .small()
-                            .color(if *ok { theme::OK } else { theme::ERR }),
+                            .color(if *ok { theme::ok() } else { theme::err() }),
                     )
                     .wrap(),
                 );
@@ -1075,31 +786,96 @@ fn settings_form(
         }
         ui.horizontal(|ui| {
             ui.add_space(158.0);
-            ui.label(RichText::new("Get a free key at aistudio.google.com/apikey. Leave empty to use the GEMINI_API_KEY environment variable.").small().color(theme::FAINT));
+            let help = match provider {
+                crate::config::Provider::Gemini => "Free key: aistudio.google.com/apikey. Leave empty to use the GEMINI_API_KEY environment variable.",
+                crate::config::Provider::Nvidia => "Create a key at build.nvidia.com (it starts with nvapi-). Leave empty to use the NVIDIA_API_KEY environment variable.",
+                crate::config::Provider::Openai => "OpenAI, OpenRouter, Ollama (http://localhost:11434/v1), LM Studio, vLLM and others. The address must end in /v1.",
+            };
+            ui.add(egui::Label::new(RichText::new(help).small().color(theme::faint())).wrap());
         });
-        field(ui, "Model", |ui| {
-            egui::ComboBox::from_id_salt("settings_model")
-                .selected_text(&d.model)
-                .width(260.0)
-                .show_ui(ui, |ui| {
-                    for m in &app.models {
-                        ui.selectable_value(&mut d.model, m.clone(), m);
-                    }
-                });
-        });
+        if !app.models.is_empty() {
+            field(ui, "Model", |ui| {
+                egui::ComboBox::from_id_salt("settings_model")
+                    .selected_text(model.as_str())
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        for m in &app.models {
+                            ui.selectable_value(model, m.clone(), m);
+                        }
+                    });
+            });
+        }
         field(ui, "Model ID", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut d.model).desired_width(260.0));
+            ui.add(egui::TextEdit::singleline(model).desired_width(300.0));
+        });
+        if provider != crate::config::Provider::Gemini {
+            field(ui, "Max answer tokens", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut d.max_output_tokens)
+                        .range(256..=131072)
+                        .speed(256),
+                );
+            });
+        }
+        if provider != crate::config::Provider::Gemini {
+            field(ui, "Tool calling", |ui| {
+                egui::ComboBox::from_id_salt("settings_tool_mode")
+                    .selected_text(d.tool_mode.label())
+                    .width(300.0)
+                    .show_ui(ui, |ui| {
+                        for m in crate::config::ToolMode::ALL {
+                            ui.selectable_value(&mut d.tool_mode, m, m.label());
+                        }
+                    });
+            });
+        }
+        field(ui, "Token budget per task", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut d.max_task_tokens)
+                    .range(0..=100_000_000)
+                    .speed(50_000)
+                    .custom_formatter(|n, _| {
+                        if n == 0.0 {
+                            "no limit".to_string()
+                        } else {
+                            format!("{:.0} k", n / 1000.0)
+                        }
+                    }),
+            )
+            .on_hover_text(
+                "The task stops when all its requests together reach this many tokens. 0 means no limit.",
+            );
         });
         field(ui, "Max steps per task", |ui| {
             ui.add(
                 egui::DragValue::new(&mut d.max_steps)
-                    .range(5..=100)
+                    .range(5..=200)
                     .speed(1),
             );
         });
     });
 
-    section(ui, "PROJECT FILES", |ui| {
+    section(ui, "Project files", |ui| {
+        field(ui, "Ask before commands", |ui| {
+            egui::ComboBox::from_id_salt("settings_permission")
+                .selected_text(d.permission.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for m in crate::config::PermissionMode::ALL {
+                        ui.selectable_value(&mut d.permission, m, m.label());
+                    }
+                });
+        });
+        field(ui, "Check files after writing", |ui| {
+            egui::ComboBox::from_id_salt("settings_auto_check")
+                .selected_text(d.auto_check.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for c in crate::config::CheckLevel::ALL {
+                        ui.selectable_value(&mut d.auto_check, c, c.label());
+                    }
+                });
+        });
         ui.checkbox(
             &mut d.auto_apply,
             "Apply the agent's changes to my project automatically when a task finishes",
@@ -1110,15 +886,38 @@ fn settings_form(
         );
         ui.label(
             RichText::new(
-                "Everything the agent reads is sent to Gemini. Secret files are hidden by default.",
+                "Everything the agent reads is sent to the selected AI service. Secret files are hidden by default.",
             )
             .small()
-            .color(theme::FAINT),
+            .color(theme::faint()),
         );
     });
 
-    section(ui, "SANDBOX (DOCKER)", |ui| {
-        field(ui, "Image", |ui| {
+    section(ui, "Sandbox", |ui| {
+        field(ui, "Run commands in", |ui| {
+            egui::ComboBox::from_id_salt("settings_backend")
+                .selected_text(d.sandbox.backend.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for b in crate::config::SandboxBackend::ALL {
+                        ui.selectable_value(&mut d.sandbox.backend, b, b.label());
+                    }
+                });
+        });
+        field(ui, "WSL distribution", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut d.sandbox.wsl_distro)
+                    .hint_text("empty = first installed (e.g. Ubuntu)")
+                    .desired_width(300.0),
+            );
+        });
+        ui.label(
+            RichText::new("Automatic runs commands with bash on this computer when there is one (Git Bash on Windows): the fastest and lightest way, not isolated, dangerous commands are refused. Otherwise Docker, then WSL.")
+                .small()
+                .color(theme::faint()),
+        );
+        ui.add_space(4.0);
+        field(ui, "Docker image", |ui| {
             ui.add(egui::TextEdit::singleline(&mut d.sandbox.image).desired_width(260.0));
         });
         ui.checkbox(
@@ -1148,44 +947,19 @@ fn settings_form(
         });
     });
 
-    section(ui, "GOOGLE DRIVE", |ui| {
-        field(ui, "OAuth client ID", |ui| {
-            ui.add(egui::TextEdit::singleline(&mut d.drive.client_id).desired_width(300.0));
-        });
-        field(ui, "OAuth client secret", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut d.drive.client_secret)
-                    .password(true)
-                    .desired_width(300.0),
-            );
-        });
-        field(ui, "Drive folder name", |ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut d.drive.folder_name)
-                    .hint_text("Gagent")
-                    .desired_width(300.0),
-            );
-        });
-        ui.label(
-            RichText::new("Create the client in Google Cloud Console as type \"TVs and Limited Input devices\" and enable the Google Drive API. Then connect from the Drive tab.")
-                .small()
-                .color(theme::FAINT),
-        );
-    });
-
-    section(ui, "DATA", |ui| {
+    section(ui, "Data", |ui| {
         ui.label(
             RichText::new(app.dirs.root().display().to_string())
                 .monospace()
                 .small()
-                .color(theme::MUTED),
+                .color(theme::muted()),
         );
         ui.label(
             RichText::new(
                 "Settings, sessions, private project copies and backups are stored here.",
             )
             .small()
-            .color(theme::FAINT),
+            .color(theme::faint()),
         );
         if plain_button(ui, "Open data folder").clicked() {
             let _ = opener::open(app.dirs.root());

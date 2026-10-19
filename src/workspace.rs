@@ -161,7 +161,7 @@ pub fn normalize_rel(raw: &str) -> Result<String> {
 
     let bytes = text.as_bytes();
     let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
-    if text.starts_with('/') || text.starts_with("~") || has_drive {
+    if text.starts_with('/') || text == "~" || text.starts_with("~/") || has_drive {
         bail!(
             "absolute paths are not allowed ('{raw}'); use a path relative to the workspace root"
         );
@@ -172,10 +172,45 @@ pub fn normalize_rel(raw: &str) -> Result<String> {
         match part {
             "" | "." => {}
             ".." => bail!("'..' is not allowed in paths ('{raw}')"),
-            p => parts.push(p),
+            p => {
+                if cfg!(windows) {
+                    if let Some(problem) = windows_name_problem(p) {
+                        bail!("'{p}' cannot be used as a file name on Windows: {problem}");
+                    }
+                }
+                parts.push(p)
+            }
         }
     }
     Ok(parts.join("/"))
+}
+
+/// Explains why `name` is not a valid file or folder name on Windows, if it is not.
+///
+/// On Windows such names are dangerous rather than just invalid: `CON` and `NUL`
+/// open devices, and `name:stream` writes to a hidden NTFS data stream.
+pub fn windows_name_problem(name: &str) -> Option<&'static str> {
+    if name
+        .chars()
+        .any(|c| c.is_control() || "<>:\"|?*".contains(c))
+    {
+        return Some("it contains one of the characters < > : \" | ? *");
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("it ends with a dot or a space");
+    }
+    let stem = name.split('.').next().unwrap_or("").trim_end();
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|p| {
+            upper
+                .strip_prefix(p)
+                .is_some_and(|n| n.len() == 1 && matches!(n.as_bytes()[0], b'1'..=b'9'))
+        });
+    if reserved {
+        return Some("it is a reserved device name");
+    }
+    None
 }
 
 /// Lists all regular files below `root` that Gagent is willing to handle.
@@ -363,6 +398,39 @@ mod tests {
         .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].rel, "small.txt");
+    }
+
+    #[test]
+    fn windows_names_are_checked() {
+        for bad in [
+            "con", "NUL", "Aux.txt", "com1", "LPT9.log", "a:b", "a?b", "x ", "x.", "a|b", "q\"",
+        ] {
+            assert!(
+                windows_name_problem(bad).is_some(),
+                "{bad} should be rejected"
+            );
+        }
+        for good in [
+            "main.rs",
+            "console.log",
+            "com10",
+            "comm",
+            ".env",
+            "a b.txt",
+            "~tmp",
+        ] {
+            assert!(
+                windows_name_problem(good).is_none(),
+                "{good} should be fine"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_only_means_home_at_the_start() {
+        assert!(normalize_rel("~").is_err());
+        assert!(normalize_rel("~/x").is_err());
+        assert_eq!(normalize_rel("~backup.txt").unwrap(), "~backup.txt");
     }
 
     #[test]
