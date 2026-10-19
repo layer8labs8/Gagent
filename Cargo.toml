@@ -1,10 +1,10 @@
 [package]
 name = "gagent"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Gagent: a light native desktop coding agent for Gemini, NVIDIA and OpenAI-compatible models; runs code on your own computer, or in Docker / WSL"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/layer8labs8/Gagent"
 readme = "README.md"
 default-run = "gagent"

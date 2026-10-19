@@ -1,3 +1,26 @@
+"Commons Clause" License Condition v1.0
+
+The Software is provided to you by the Licensor under the License, as defined
+below, subject to the following condition.
+
+Without limiting other conditions in the License, the grant of rights under the
+License will not include, and the License does not grant to you, the right to
+Sell the Software.
+
+For purposes of the foregoing, "Sell" means practicing any or all of the rights
+granted to you under the License to provide to third parties, for a fee or other
+consideration (including without limitation fees for hosting or consulting/
+support services related to the Software), a product or service whose value
+derives, entirely or substantially, from the functionality of the Software. Any
+license notice or attribution required by the License must also include this
+Commons Clause License Condition notice.
+
+Software: Gagent
+License: MIT License, with the Additional Terms below
+Licensor: layer8labs8
+
+-------------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 layer8labs8
@@ -19,3 +42,27 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+Additional Terms
+
+1. Use. Anyone, including companies, may use the Software for any purpose,
+   including to write and ship commercial software. What you create with the
+   Software belongs to you, and nothing in this license restricts it.
+
+2. Selling is reserved. The right to Sell the Software (as defined in the
+   Commons Clause above) belongs to the Licensor alone. This includes selling a
+   modified version, a product built from a substantial part of the code, and
+   paid hosting or paid support of the Software. The Licensor may give written
+   permission on request; ask in an issue or a discussion at
+   https://github.com/layer8labs8/Gagent.
+
+3. Credit. Every copy must keep this file and the copyright notice. A modified
+   version, and any other work that includes a substantial part of the code,
+   must say clearly in its README and in its About or Help screen:
+   "Based on Gagent by layer8labs8 (https://github.com/layer8labs8/Gagent)".
+
+4. Name. "Gagent", the G logo and "layer8labs8" belong to the Licensor, and this
+   license gives no rights to them. A modified version must say that it is
+   modified and must not present itself as the official Gagent.
