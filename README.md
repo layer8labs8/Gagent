@@ -13,8 +13,9 @@ Gemini · NVIDIA · any OpenAI-compatible API · one small native app · no brow
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/layer8labs8/Gagent?include_prereleases)](https://github.com/layer8labs8/Gagent/releases)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+[![Stars](https://img.shields.io/github/stars/layer8labs8/Gagent?style=social)](https://github.com/layer8labs8/Gagent/stargazers)
 
-[Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Providers](#providers) · [Command line](#command-line) · [Build](#build-from-source)
+[Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Providers](#providers) · [Command line](#command-line) · [Roadmap](ROADMAP.md) · [Build](#build-from-source)
 
 </div>
 
@@ -59,8 +60,15 @@ gagent
 
 **macOS** should work (`cargo build --release`) but has not been tested yet.
 
-Get a key: [Gemini](https://aistudio.google.com/apikey) (free) · [NVIDIA](https://build.nvidia.com) (free credits, starts
-with `nvapi-`) · any OpenAI-compatible server (its address ends in `/v1`; local servers such as Ollama need no key).
+### Get an API key
+
+| Service | Where | Cost |
+|---|---|---|
+| Google Gemini | [Google AI Studio](https://aistudio.google.com/apikey) ("Create API key"); [guide](https://ai.google.dev/gemini-api/docs/api-key) | free tier with a daily quota |
+| NVIDIA-hosted models | [build.nvidia.com](https://build.nvidia.com): sign in, open a model, press "Get API Key" (or go to your [API keys](https://build.nvidia.com/settings/api-keys)); [quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart). The key starts with `nvapi-` | free credits for developers |
+| Any OpenAI-compatible server | [OpenRouter](https://openrouter.ai), [Ollama](https://ollama.com) and [LM Studio](https://lmstudio.ai) run locally or in the cloud; the address ends in `/v1` | local servers need no key |
+
+Paste the key in **Settings**. It is stored on your computer and sent only to the service you chose.
 
 ## What do I need to install?
 
@@ -185,10 +193,29 @@ src/gui/           egui desktop app                     src/bin/           gagen
 tests/             mock model servers and real sandbox tests
 ```
 
+## Roadmap
+
+Next: a first-run guide, plan mode, a token meter, streaming and installers. Later: **several agents working together**
+(planner, workers and a reviewer, each with its own copy of the project and its own token budget), model routing between a
+strong and a cheap model, MCP tools, local-model tuning and benchmarks. The full list, with the places where help is
+welcome, is in [ROADMAP.md](ROADMAP.md).
+
 ## Contributing
 
-Issues and pull requests are welcome. Please run `cargo test` first. See [TODO.md](TODO.md) for what is verified and what is
-still open.
+Issues and pull requests are welcome. Please run `cargo test` first and keep changes light: no heavy dependencies and
+nothing that starts in the background without being asked. [TODO.md](TODO.md) lists what is verified and what is still open.
+
+## About this project
+
+Gagent is a small independent project. I do not have the computers or the budget of a big lab, so I built it and checked
+it with short tests on my own modest machine, and I kept it light on purpose so that it also works on weak ones. If it is
+useful to you, a star on GitHub would make me happy, and bug reports, ideas and pull requests help more than anything.
+
+Follow along: [Instagram](https://www.instagram.com/layer8labs8) · [YouTube](https://www.youtube.com/@layer8labs8) ·
+[TikTok](https://www.tiktok.com/@layer8labs8) · [Threads](https://www.threads.net/@layer8labs8) · [GitHub](https://github.com/layer8labs8)
+
+Gagent is not affiliated with, endorsed by or sponsored by Google or NVIDIA. Gemini, Google AI Studio, NVIDIA, NIM and
+build.nvidia.com are names of their owners and are used only to say which services Gagent can talk to.
 
 ## License
 
