@@ -4,9 +4,11 @@
 //! program then hands the tasks to the agents one by one, each on its own model, and every
 //! agent leaves a short note for the next. Design: `docs/TEAM_MODE.md`.
 
+mod detect;
 mod plan;
 mod run;
 
+pub use detect::{looks_big, split_command};
 pub use plan::{assign_owner, Plan, Status, Task};
 pub use run::{run_team, TeamEvent, TeamOutcome};
 

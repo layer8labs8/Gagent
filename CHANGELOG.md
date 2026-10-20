@@ -4,6 +4,17 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **One window for everything.** There is no separate "project" any more. Write what you want in a session: a small job goes to
+  one agent, a big one (an app, a site, a long list of wishes) is planned by a lead, the AIs that fit are chosen automatically
+  (Auto) and the team starts after your yes. The plan and the tasks sit above the message box. `Team: auto / on / off` next to the
+  message box, `/team` and `/solo` in front of a message, and a setting to start plans without asking. Choosing every agent by
+  hand is still possible (a small link in the sidebar).
+- **Voice.** The microphone button writes what you say into the message box (Groq's Whisper when your Groq project allows it,
+  otherwise a Gemini model; the sound is deleted at once). Settings can read the answers aloud with a Gemini voice. Recording uses
+  PowerShell on Windows and `arecord` on Linux, so nothing heavy is added.
+- Gemini's model names that no longer exist for new users are replaced by current ones (`gemini-flash-latest`, `gemini-3.6-flash`).
+- A settings file that starts with a byte order mark (saved by Notepad) is no longer treated as damaged.
+
 - **Auto is the default.** New installs choose the model by themselves for every message (turn it off next to the message box).
 - **Tokens per company.** The header of a session shows how many tokens it used and how they split between Gemini, NVIDIA, Groq
   and any other server you added (Settings → AI model → OpenAI-compatible: OpenRouter, DeepSeek, Mistral, Ollama...).

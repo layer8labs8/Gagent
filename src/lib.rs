@@ -21,6 +21,7 @@ pub mod modelstats;
 pub mod models;
 pub mod openai;
 pub mod permission;
+pub mod speech;
 pub mod usage;
 pub mod policy;
 pub mod profiles;

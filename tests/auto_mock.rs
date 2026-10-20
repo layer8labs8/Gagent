@@ -45,6 +45,11 @@ fn settings(gemini: &MockGemini, nvidia: &MockGemini) -> Settings {
     s.model = "gemini-2.5-pro".into();
     s.nvidia.api_key = "nvapi-KEY".into();
     s.normalize();
+    // The mock Gemini has this one model; its siblings are not asked for.
+    modelstats::set_live_models(
+        &gagent::ratelimit::host_of(&gemini.base_url),
+        vec!["gemini-2.5-pro".to_string()],
+    );
     s
 }
 

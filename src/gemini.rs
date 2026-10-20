@@ -322,7 +322,7 @@ pub(crate) fn note_failure(host: &str, model: &str, error: &ApiError) {
     }
 }
 
-fn http_error(response: &crate::http::Response) -> ApiError {
+pub(crate) fn http_error(response: &crate::http::Response) -> ApiError {
     let message = serde_json::from_slice::<Value>(&response.body)
         .ok()
         .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
