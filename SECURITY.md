@@ -21,6 +21,10 @@ you use it on anything that matters.
   server). Do not use Gagent on files you may not share. `.env` files and private keys are hidden from the agent unless you allow them.
 - **Your API keys are saved as plain text** in `settings.json` in the data folder (`%LOCALAPPDATA%\Gagent` or `~/.local/share/Gagent`).
   Keep that folder private, use keys with limits, and replace a key that may have leaked.
+- **The web tools can carry data out.** An address or a search the agent writes goes to the internet, and a page can hide
+  instructions. That is why you are asked first (Auto and Ask modes) and the full address is shown: look at it before you say yes.
+  Addresses of a private network, `file:` and addresses with a user name are refused. Turn the tools off in Settings if you do not
+  want them.
 - **Your voice goes to the AI service too.** The microphone button records only while you have switched it on, sends the sound to
   Groq or Google to be written down, and deletes the file at once. Reading answers aloud sends the text of the answer to Google.
 - **Pages are opened for screenshots.** `screenshot` opens an HTML file of the project, or a local server, in your browser without a

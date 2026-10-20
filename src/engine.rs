@@ -155,6 +155,7 @@ impl Engine {
             reads: Default::default(),
             // With an automatic choice the model that sees is picked once a picture is in the chat.
             vision: self.settings.auto_pick || crate::models::sees_images(self.settings.active_model()),
+            web: self.settings.web_tools,
         })
     }
 
@@ -184,6 +185,7 @@ impl Engine {
             wsl,
             host,
             vision: ctx.vision,
+            web: ctx.web,
             tools: &tools,
         })
     }

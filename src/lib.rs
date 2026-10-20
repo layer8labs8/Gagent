@@ -24,6 +24,7 @@ pub mod gitops;
 pub mod permission;
 pub mod speech;
 pub mod usage;
+pub mod web;
 pub mod policy;
 pub mod profiles;
 pub mod prompt;

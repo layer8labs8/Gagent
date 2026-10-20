@@ -4,6 +4,13 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **Web search and reading pages.** The agent has two new tools, `web_search` (DuckDuckGo, no key needed) and `web_fetch` (a page or
+  text file as plain text, in parts when it is long). The user is asked before every search and before every new host in the modes
+  Ask and Auto ("Always allow" is remembered per host until Gagent is closed); the question shows the full address. Your own server
+  on `localhost` is read without a question. Addresses on a private network (`192.168...`, `10...`, the cloud metadata address),
+  `file:` and addresses with a user name are never read, and a redirect to another host is asked about again. What comes from the
+  internet is marked as data, not as instructions. Switch it off in Settings.
+
 - **Git checkpoint, diff and commit.** When the project is a git repository, Gagent saves a checkpoint of it right before the agent's
   changes reach it (a commit object under `refs/gagent/`: your branch, index and files are not touched, and the newest 20 are kept).
   The Changes panel has a Git box: the branch, how many files are not committed, **Show git diff** for the files the agent changed,

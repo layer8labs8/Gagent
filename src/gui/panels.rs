@@ -1077,6 +1077,10 @@ fn settings_form(
             "Start the plan of a team without asking me (a team uses more tokens)",
         );
         ui.checkbox(
+            &mut d.web_tools,
+            "Let the agent search the web and read pages (it asks you first; the page address or search words go to the internet)",
+        );
+        ui.checkbox(
             &mut d.git_checkpoint,
             "Save a git checkpoint before the agent's changes reach a git project (your branch is not touched)",
         );

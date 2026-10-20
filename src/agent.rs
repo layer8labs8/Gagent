@@ -117,7 +117,7 @@ pub fn run_turn(
     }
     history.push(json!({ "role": "user", "parts": first_parts }));
 
-    let declarations = tools::declarations_for(ctx.vision);
+    let declarations = tools::declarations_with(ctx.vision, ctx.web);
     let mut usage = Usage::default();
     let mut steps = 0;
     let mut final_text = String::new();

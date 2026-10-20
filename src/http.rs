@@ -17,6 +17,10 @@ pub struct Response {
     pub body: Vec<u8>,
     /// Value of the `Retry-After` header in seconds, when present.
     pub retry_after: Option<u64>,
+    /// The `Location` header (where a redirect leads), when present.
+    pub location: Option<String>,
+    /// The `Content-Type` header in lower case, when present.
+    pub content_type: Option<String>,
 }
 
 impl Response {
@@ -54,14 +58,28 @@ pub struct Http {
 impl Http {
     /// Creates a client. `timeout` limits a whole request, including the body.
     pub fn new(timeout: Duration, max_body: u64) -> Self {
+        Self::build(timeout, max_body, true)
+    }
+
+    /// A client that returns a redirect as it is, so that the caller can look at where it leads.
+    pub fn without_redirects(timeout: Duration, max_body: u64) -> Self {
+        Self::build(timeout, max_body, false)
+    }
+
+    fn build(timeout: Duration, max_body: u64, follow_redirects: bool) -> Self {
         let tls = TlsConfig::builder().root_certs(root_certs()).build();
-        let config = Config::builder()
+        let builder = Config::builder()
             .http_status_as_error(false)
             .timeout_global(Some(timeout))
             .timeout_connect(Some(Duration::from_secs(20)))
             .user_agent(format!("Gagent/{}", crate::VERSION))
-            .tls_config(tls)
-            .build();
+            .tls_config(tls);
+        let builder = if follow_redirects {
+            builder
+        } else {
+            builder.max_redirects(0).max_redirects_will_error(false)
+        };
+        let config = builder.build();
         Self {
             agent: Agent::new_with_config(config),
             max_body,
@@ -135,6 +153,15 @@ impl Http {
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.trim().to_string())
+        };
+        let location = header("location");
+        let content_type = header("content-type").map(|v| v.to_ascii_lowercase());
         let body = response
             .body_mut()
             .with_config()
@@ -145,6 +172,8 @@ impl Http {
             status,
             body,
             retry_after,
+            location,
+            content_type,
         })
     }
 }
