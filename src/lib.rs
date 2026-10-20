@@ -20,6 +20,7 @@ pub mod llm;
 pub mod modelstats;
 pub mod models;
 pub mod openai;
+pub mod gitops;
 pub mod permission;
 pub mod speech;
 pub mod usage;

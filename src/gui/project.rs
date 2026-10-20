@@ -462,6 +462,10 @@ impl GagentApp {
                     a.log_info(&text);
                     a.session.items.push(ChatItem::Notice(text));
                     if let Some(report) = done.auto_applied {
+                        a.applied.extend(report.applied.iter().cloned());
+                        if report.checkpoint.is_some() {
+                            a.checkpoint = report.checkpoint.clone();
+                        }
                         a.session
                             .items
                             .push(ChatItem::Notice(apply_summary(&report)));
@@ -476,6 +480,7 @@ impl GagentApp {
         }
         self.save_session(session);
         self.refresh_changes_for(session);
+        self.refresh_git(session);
     }
 }
 

@@ -184,6 +184,13 @@ fn main() -> ExitCode {
     }
 }
 
+/// Says where the git checkpoint of a git project was saved.
+fn say_checkpoint(report: &gagent::shadow::ApplyReport) {
+    if let Some(c) = &report.checkpoint {
+        eprintln!("Git checkpoint {c} saved before the changes (`git diff {c}` shows what changed since).");
+    }
+}
+
 /// One line for a plan task.
 fn print_plan(plan: &gagent::team::Plan) {
     eprintln!("\nPlan: {}", truncate_end(&plan.goal, 120));
@@ -322,6 +329,7 @@ fn team_project(
     }
     if let Some(report) = &auto_applied {
         eprintln!("\nApplied {} file(s) to {}.", report.applied.len(), folder.display());
+        say_checkpoint(report);
     }
     let plan = &outcome.plan;
     eprintln!(
@@ -337,6 +345,7 @@ fn team_project(
     if apply && !changes.is_empty() {
         let report = engine.apply_all()?;
         eprintln!("Applied {} file(s) to {}", report.applied.len(), folder.display());
+        say_checkpoint(&report);
         for (file, why) in &report.skipped {
             eprintln!("  skipped {file}: {why}");
             keep = true;
@@ -521,6 +530,7 @@ fn run_task(
         for file in &report.applied {
             eprintln!("  {file}");
         }
+        say_checkpoint(report);
         for (file, why) in &report.skipped {
             eprintln!("  skipped {file}: {why}");
         }
@@ -541,6 +551,7 @@ fn run_task(
             report.applied.len(),
             folder.display()
         );
+        say_checkpoint(&report);
         for (file, why) in &report.skipped {
             eprintln!("  skipped {file}: {why}");
             keep = true;

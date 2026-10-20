@@ -80,6 +80,8 @@ pub struct ApplyReport {
     pub skipped: Vec<(String, String)>,
     /// Directory holding the backup, when anything was applied.
     pub backup: Option<PathBuf>,
+    /// Short hash of the git checkpoint saved before the project changed (a git project only).
+    pub checkpoint: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -108,6 +108,8 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
     let confirm = a.confirm_discard;
     let running = a.is_running();
 
+    git_box(app, ui);
+
     let mut toggle: Option<String> = None;
     let mut view: Option<String> = None;
     let mut apply: Option<Vec<String>> = None;
@@ -363,6 +365,151 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
     }
     if let Some(dir) = undo {
         app.revert_backup(dir);
+    }
+}
+
+/// Git of the project: the checkpoint, the diff of the agent's files and a commit of them.
+fn git_box(app: &mut GagentApp, ui: &mut egui::Ui) {
+    let Some(a) = app.active() else {
+        return;
+    };
+    let Some(g) = a.git.clone() else {
+        return;
+    };
+    let mine: Vec<String> = a.applied.iter().filter(|f| g.changed.contains(*f)).cloned().collect();
+    let checkpoint = a.checkpoint.clone();
+    let diff_text = a.git_diff.clone();
+    let draft = a.commit_draft.clone();
+    let title = a.session.meta.title.clone();
+    let busy = a.is_running();
+
+    let (mut show_diff, mut close_diff, mut start_commit) = (false, false, false);
+    let (mut cancel_commit, mut do_commit) = (false, false);
+    let mut new_draft = draft.clone();
+    Frame::new()
+        .fill(theme::card_bg())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            heading_label(ui, "Git");
+            ui.label(
+                RichText::new(format!(
+                    "Branch {}  |  {} file(s) with changes that are not committed",
+                    g.branch,
+                    g.changed.len()
+                ))
+                .small()
+                .color(theme::muted()),
+            );
+            if let Some(c) = &checkpoint {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "Checkpoint {c} was saved before the agent's changes reached your project. `git diff {c}` shows what changed since."
+                        ))
+                        .small()
+                        .color(theme::faint()),
+                    )
+                    .wrap(),
+                );
+            }
+            if mine.is_empty() {
+                ui.label(
+                    RichText::new("No change of the agent is waiting for a commit.")
+                        .small()
+                        .color(theme::faint()),
+                );
+            } else {
+                ui.label(format!("{} file(s) the agent changed are not committed.", mine.len()));
+                ui.horizontal(|ui| {
+                    if plain_button(ui, "Show git diff").clicked() {
+                        show_diff = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            !busy && draft.is_none(),
+                            egui::Button::new(RichText::new("Commit...").strong()),
+                        )
+                        .on_hover_text("Commits these files only; your other changes stay as they are")
+                        .clicked()
+                    {
+                        start_commit = true;
+                    }
+                });
+                if let Some(text) = new_draft.as_mut() {
+                    ui.add(
+                        egui::TextEdit::singleline(text)
+                            .hint_text("Commit message")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.horizontal(|ui| {
+                        if primary_button(ui, "Commit").clicked() {
+                            do_commit = true;
+                        }
+                        if plain_button(ui, "Cancel").clicked() {
+                            cancel_commit = true;
+                        }
+                    });
+                }
+            }
+            if let Some(text) = &diff_text {
+                ui.separator();
+                egui::ScrollArea::both()
+                    .id_salt("git_diff_view")
+                    .max_height(220.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        for line in text.lines() {
+                            let color = if line.starts_with("+++") || line.starts_with("---") {
+                                theme::muted()
+                            } else if line.starts_with('+') {
+                                theme::ok()
+                            } else if line.starts_with('-') {
+                                theme::err()
+                            } else if line.starts_with("@@") {
+                                theme::accent()
+                            } else {
+                                theme::muted()
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(line).monospace().size(12.5).color(color),
+                                )
+                                .extend(),
+                            );
+                        }
+                    });
+                if plain_button(ui, "Close diff").clicked() {
+                    close_diff = true;
+                }
+            }
+        });
+    ui.add_space(8.0);
+
+    if show_diff {
+        app.git_show_diff();
+    }
+    if start_commit {
+        if let Some(a) = app.active_mut() {
+            a.commit_draft = Some(format!("Gagent: {}", truncate_end(&title, 60)));
+        }
+    } else if cancel_commit {
+        if let Some(a) = app.active_mut() {
+            a.commit_draft = None;
+        }
+    } else if do_commit {
+        app.git_commit(new_draft.clone().unwrap_or_default());
+    } else if new_draft != draft {
+        if let Some(a) = app.active_mut() {
+            a.commit_draft = new_draft;
+        }
+    }
+    if close_diff {
+        if let Some(a) = app.active_mut() {
+            a.git_diff = None;
+        }
     }
 }
 
@@ -928,6 +1075,10 @@ fn settings_form(
         ui.checkbox(
             &mut d.team_auto_start,
             "Start the plan of a team without asking me (a team uses more tokens)",
+        );
+        ui.checkbox(
+            &mut d.git_checkpoint,
+            "Save a git checkpoint before the agent's changes reach a git project (your branch is not touched)",
         );
         ui.checkbox(
             &mut d.speak_answers,

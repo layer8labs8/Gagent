@@ -220,6 +220,16 @@ pub struct ActiveSession {
     pub confirm_discard: bool,
     /// Set for a team project.
     pub team: Option<TeamUi>,
+    /// Files the agent put into the project that are not committed yet.
+    pub applied: std::collections::BTreeSet<String>,
+    /// The git repository of the project, when it is one.
+    pub git: Option<crate::gitops::GitInfo>,
+    /// `git diff` of the agent's files, while it is shown.
+    pub git_diff: Option<String>,
+    /// The message of a commit that is being written.
+    pub commit_draft: Option<String>,
+    /// The git checkpoint saved before the last apply.
+    pub checkpoint: Option<String>,
 }
 
 impl ActiveSession {
@@ -249,6 +259,11 @@ impl ActiveSession {
             terminal: Terminal::default(),
             focus_input: true,
             confirm_discard: false,
+            applied: Default::default(),
+            git: None,
+            git_diff: None,
+            commit_draft: None,
+            checkpoint: None,
         }
     }
 
@@ -363,4 +378,23 @@ pub enum Msg {
     },
     /// An answer, spoken (a WAV file).
     Spoken(Result<Vec<u8>, String>),
+    /// The files of an apply, and the git checkpoint saved before it.
+    AppliedFiles {
+        session: String,
+        files: Vec<String>,
+        checkpoint: Option<String>,
+    },
+    Git {
+        session: String,
+        info: Option<crate::gitops::GitInfo>,
+    },
+    GitDiff {
+        session: String,
+        text: String,
+    },
+    /// A commit of the agent's files: the short hash and how many files, or the reason it failed.
+    Committed {
+        session: String,
+        result: Result<(String, usize), String>,
+    },
 }
