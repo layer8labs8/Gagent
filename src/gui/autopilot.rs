@@ -19,6 +19,8 @@ use crate::team::AgentSpec;
 #[derive(PartialEq)]
 enum Stage {
     Start,
+    /// The session of the unified flow is open; waiting for its workspace.
+    Opened,
     Created,
     Approved,
 }
@@ -32,6 +34,8 @@ pub struct Autopilot {
     out: PathBuf,
     limit: Duration,
     plan_ready: Option<f32>,
+    /// Test the unified flow: open a session, type the goal and press Enter, like a person.
+    unified: bool,
 }
 
 impl Autopilot {
@@ -57,6 +61,7 @@ impl Autopilot {
                     .unwrap_or(900),
             ),
             plan_ready: None,
+            unified: std::env::var_os("GAGENT_AUTOPILOT_UNIFIED").is_some(),
         })
     }
 }
@@ -112,6 +117,16 @@ pub fn step(app: &mut GagentApp) {
     match ap.stage {
         Stage::Start => {
             if ap.started.elapsed() > Duration::from_secs(2) {
+                // The test folder is the driver's own: it answers the trust question with yes.
+                if let Ok(path) = dunce::canonicalize(&ap.folder) {
+                    app.settings.trust_folder(&path.to_string_lossy());
+                }
+            }
+            if ap.started.elapsed() > Duration::from_secs(2) && ap.unified {
+                let folder = ap.folder.clone();
+                app.start_session(&folder);
+                ap.stage = Stage::Opened;
+            } else if ap.started.elapsed() > Duration::from_secs(2) {
                 let mut draft = ProjectDraft::new(app);
                 draft.folder = ap.folder.clone();
                 draft.goal = ap.goal.clone();
@@ -145,6 +160,21 @@ pub fn step(app: &mut GagentApp) {
                     Ok(()) => ap.stage = Stage::Created,
                     Err(e) => finish(app, &ap, &format!("could not create the project: {e}"), 2),
                 }
+            }
+        }
+        Stage::Opened => {
+            if let Some(a) = app.active() {
+                if let EngineState::Failed(e) = &a.engine {
+                    let e = e.clone();
+                    finish(app, &ap, &format!("workspace failed: {e}"), 2);
+                }
+            }
+            if app.active().is_some_and(|a| matches!(a.engine, EngineState::Ready(_))) {
+                if let Some(a) = app.active_mut() {
+                    a.input = ap.goal.clone();
+                }
+                app.send_message();
+                ap.stage = Stage::Created;
             }
         }
         Stage::Created => {

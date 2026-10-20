@@ -925,6 +925,21 @@ fn settings_form(
             &mut d.share_secret_files,
             "Let the agent see secret files (.env, private keys)",
         );
+        ui.checkbox(
+            &mut d.team_auto_start,
+            "Start the plan of a team without asking me (a team uses more tokens)",
+        );
+        ui.checkbox(
+            &mut d.speak_answers,
+            "Read the answers aloud (a Gemini voice; the text goes to Google)",
+        );
+        field(ui, "Language you speak", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut d.voice_language)
+                    .hint_text("empty = find out (az, tr, en, ru...)")
+                    .desired_width(260.0),
+            );
+        });
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!("Trusted folders: {}", d.trusted_folders.len()))

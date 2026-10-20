@@ -91,10 +91,16 @@ tells you what it needs.
 
 - Agent loop with tools: list, read, search, write, edit, delete files and run commands; retries on rate limits, stop
   button, long-session history compaction, switch provider at any time.
-- **Team projects.** *New project* in the sidebar: add AI agents one by one (provider, model, role, token limit). The lead writes a plan
-  with a contract between the parts, you approve it, and each agent does its tasks on its own model, leaving a note for the next one.
-  A task that fails is taken over by another agent. A board shows every task and who does it; the Changes tab shows the result.
-  Also from the command line: `gagent-cli team`.
+- **One window, small jobs and big ones.** Write what you want in a session. A small job goes to one agent. A big one (an app, a
+  site, a long list of wishes) is planned by a lead, who writes a plan with a contract between the parts; the AIs that fit are chosen
+  automatically, you say yes, and each does its tasks on its own model, leaving a note for the next one. A task that fails is taken
+  over by another agent. A board above the message box shows every task and who does it; the Changes tab shows the result. Start a
+  message with `/team` or `/solo` to decide yourself, or use `Team: auto / on / off` next to the message box. Choosing every agent by
+  hand is possible too, and from the command line there is `gagent-cli team`.
+- **Pictures and voice.** Attach a picture to a message and a model that can see answers it. The microphone button writes what you say
+  into the message box (Groq's Whisper or a Gemini model; the sound is not kept), and Settings can read the answers aloud.
+- **Tokens per company.** The header of a session shows how many tokens it used, split between Gemini, NVIDIA, Groq and any other
+  server you added by hand (any service that speaks the OpenAI API: OpenRouter, DeepSeek, Mistral, Ollama...).
 - **It chooses for you.** Every free service has its own limits: Gemini a few requests a day, NVIDIA credits and 40 requests a minute,
   Groq fast answers but small token limits. Switch on **Auto** (next to the message box) and Gagent picks the best model that is still
   available for every message: it looks at what each model can do (code, images, size), how fast it answered before, and what is left of

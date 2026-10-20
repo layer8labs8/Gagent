@@ -356,4 +356,11 @@ pub enum Msg {
         session: String,
         outcome: Result<TeamSummary, String>,
     },
+    /// What the person said into the microphone, as text.
+    Transcribed {
+        session: String,
+        result: Result<String, String>,
+    },
+    /// An answer, spoken (a WAV file).
+    Spoken(Result<Vec<u8>, String>),
 }

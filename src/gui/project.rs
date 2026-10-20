@@ -91,6 +91,31 @@ impl ProjectDraft {
     }
 }
 
+/// True for the names of picture files.
+fn is_picture(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    ["png", "jpg", "jpeg", "gif", "webp"]
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{ext}")))
+}
+
+/// A team of one model in three roles, for when the models cannot be chosen automatically.
+fn one_model_team(settings: &Settings) -> Vec<AgentSpec> {
+    let model = settings.active_model().to_string();
+    [(Role::Lead, 150u64), (Role::Coder, 300), (Role::Tester, 200)]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (role, k))| AgentSpec {
+            name: format!("{}{}", role.label(), i + 1),
+            provider: settings.provider,
+            model: model.clone(),
+            role,
+            token_budget: k * 1000,
+            max_steps: DEFAULT_AGENT_STEPS,
+        })
+        .collect()
+}
+
 impl GagentApp {
     pub(crate) fn open_project_draft(&mut self) {
         self.current = None;
@@ -147,6 +172,84 @@ impl GagentApp {
         self.current = Some(id.clone());
         self.open_engine(&id);
         Ok(())
+    }
+
+    /// A big job written in the message box goes to a team: the lead plans, the agents are
+    /// chosen by themselves (the best that are available), and they start after the user's yes.
+    /// Returns true when the message was taken as a team project, false when one agent answers it.
+    pub(crate) fn try_start_team(&mut self, id: &str) -> bool {
+        use crate::config::TeamMode;
+        let settings = self.settings.clone();
+        let Some(a) = self.open.get(id) else {
+            return false;
+        };
+        if a.run.is_some() || !matches!(a.engine, EngineState::Ready(_)) || !settings.is_configured() {
+            return false;
+        }
+        let typed = a.input.trim().to_string();
+        if typed.is_empty() {
+            return false;
+        }
+        let (goal, forced) = crate::team::split_command(&typed);
+        let goal = goal.to_string();
+        let has_picture = a.attachments.iter().any(|f| is_picture(f));
+        let wanted = !has_picture
+            && !goal.is_empty()
+            && match forced {
+                Some(team) => team,
+                None => match settings.team_mode {
+                    TeamMode::Always => true,
+                    TeamMode::Never => false,
+                    TeamMode::Auto => crate::team::looks_big(&goal),
+                },
+            };
+        if !wanted {
+            // `/solo` and `/team` are not part of what the agent reads.
+            if forced.is_some() {
+                if let Some(a) = self.open.get_mut(id) {
+                    a.input = goal;
+                }
+            }
+            return false;
+        }
+        let agents = if settings.auto_pick {
+            crate::router::suggest_team(&settings)
+        } else {
+            Vec::new()
+        };
+        let agents = if agents.is_empty() {
+            one_model_team(&settings)
+        } else {
+            agents
+        };
+        let attachments = a.attachments.clone();
+        let text = if attachments.is_empty() {
+            goal.clone()
+        } else {
+            format!(
+                "[Attached files in the workspace: {}]\n\n{goal}",
+                attachments.join(", ")
+            )
+        };
+        let config = TeamConfig {
+            goal: text,
+            agents,
+        };
+        if let Err(e) = config.team() {
+            self.show_banner(e, true);
+            return false;
+        }
+        let Some(a) = self.open.get_mut(id) else {
+            return false;
+        };
+        a.session.set_title_from(&goal);
+        a.session.items.push(ChatItem::User(goal));
+        a.session.meta.team = Some(config.clone());
+        a.team = Some(TeamUi::new(config));
+        a.input.clear();
+        a.attachments.clear();
+        self.start_team(id, false);
+        true
     }
 
     /// Plans (or continues) the project of session `id`.
@@ -228,13 +331,21 @@ impl GagentApp {
             }
             TeamEvent::PlanReady(plan) => {
                 t.plan = Some(plan);
-                t.phase = TeamPhase::Review;
-                if let Some(run) = a.run.as_mut() {
-                    run.status = "Waiting for your answer to the plan".into();
+                if self.settings.team_auto_start {
+                    t.gate.set(true);
+                    t.phase = TeamPhase::Running;
+                    a.session
+                        .items
+                        .push(ChatItem::Notice("The plan is ready. Starting.".into()));
+                } else {
+                    t.phase = TeamPhase::Review;
+                    if let Some(run) = a.run.as_mut() {
+                        run.status = "Waiting for your answer to the plan".into();
+                    }
+                    a.session.items.push(ChatItem::Notice(
+                        "The plan is ready. Read it above, then press Start.".into(),
+                    ));
                 }
-                a.session.items.push(ChatItem::Notice(
-                    "The plan is ready. Read it above, then press Start.".into(),
-                ));
             }
             TeamEvent::Resumed(plan) => {
                 t.plan = Some(plan);
@@ -552,10 +663,7 @@ pub fn bar(app: &mut GagentApp, ui: &mut egui::Ui) {
                         .color(theme::faint()),
                 );
             } else if has_plan {
-                ui.label(
-                    RichText::new("All tasks are done. Look at the Changes tab to review the result.")
-                        .color(theme::muted()),
-                );
+                // All tasks are done: the board says so, and the message box is free again.
             } else if ready && primary_button(ui, "Create plan").clicked() {
                 go_on = true;
             }

@@ -116,6 +116,12 @@ pub struct GagentApp {
     pub(crate) confirm_delete: Option<String>,
     /// The session whose folder waits for the answer to "do you trust this folder?".
     pub(crate) trust_ask: Option<String>,
+    /// The microphone is on: the session it belongs to, and the recording.
+    pub(crate) recording: Option<(String, crate::speech::Recorder)>,
+    /// What the voice part is doing now ("Writing down what you said...").
+    pub(crate) voice_status: Option<String>,
+    /// An answer that is being read aloud.
+    pub(crate) playback: Option<crate::speech::Playback>,
     started_engines: HashSet<String>,
     /// The questions of the agent ("may I install this?") wait here for the user.
     pub(crate) approvals: Arc<Approvals>,
@@ -164,6 +170,9 @@ impl GagentApp {
             new_project_path: settings.last_project.clone(),
             confirm_delete: None,
             trust_ask: None,
+            recording: None,
+            voice_status: None,
+            playback: None,
             started_engines: HashSet::new(),
             approvals,
             settings,
@@ -300,14 +309,8 @@ impl GagentApp {
 
     // ----- background work -------------------------------------------------
 
-    /// True when the user said the agent may work in this folder (the test driver always may).
+    /// True when the user said the agent may work in this folder.
     fn folder_trusted(&self, project: &str) -> bool {
-        #[cfg(feature = "autopilot")]
-        {
-            if self.autopilot.is_some() {
-                return true;
-            }
-        }
         self.settings.is_trusted(project)
     }
 
@@ -359,6 +362,10 @@ impl GagentApp {
         let Some(id) = self.current.clone() else {
             return;
         };
+        // A big job is planned and given to a team; anything else goes to one agent.
+        if self.try_start_team(&id) {
+            return;
+        }
         let settings = self.settings.clone();
         let Some(active) = self.open.get_mut(&id) else {
             return;
@@ -408,6 +415,59 @@ impl GagentApp {
         let history = active.session.history.clone();
         self.save_session(&id);
         worker::run_turn(self.notify.clone(), id, engine, history, text, cancel);
+    }
+
+    /// The microphone button: starts recording, or stops it and writes down what was said.
+    pub(crate) fn toggle_recording(&mut self) {
+        if let Some((session, recorder)) = self.recording.take() {
+            self.voice_status = Some("Writing down what you said...".into());
+            let settings = self.settings.clone();
+            let notify = self.notify.clone();
+            std::thread::spawn(move || {
+                let result = recorder.stop().and_then(|wav| {
+                    crate::speech::transcribe(&settings, &wav, settings.voice_language.trim())
+                });
+                notify.send(Msg::Transcribed { session, result });
+            });
+            return;
+        }
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        if self.voice_status.is_some() {
+            return;
+        }
+        self.stop_voice();
+        match crate::speech::Recorder::start(&self.dirs.root().join("voice")) {
+            Ok(recorder) => self.recording = Some((id, recorder)),
+            Err(e) => self.show_banner(e, true),
+        }
+    }
+
+    /// Reads the last answer of a session aloud, when the user turned that on.
+    pub(crate) fn speak_last_answer(&mut self, session: &str) {
+        if !self.settings.speak_answers || self.voice_status.is_some() {
+            return;
+        }
+        let Some(text) = self.open.get(session).and_then(|a| {
+            a.session.items.iter().rev().find_map(|i| match i {
+                crate::session::ChatItem::Assistant(t) => Some(t.clone()),
+                _ => None,
+            })
+        }) else {
+            return;
+        };
+        self.voice_status = Some("Reading the answer aloud...".into());
+        let settings = self.settings.clone();
+        let notify = self.notify.clone();
+        std::thread::spawn(move || notify.send(Msg::Spoken(crate::speech::speak(&settings, &text))));
+    }
+
+    pub(crate) fn stop_voice(&mut self) {
+        if let Some(p) = self.playback.as_mut() {
+            p.stop();
+        }
+        self.playback = None;
     }
 
     pub(crate) fn stop_run(&mut self) {
@@ -626,11 +686,13 @@ impl GagentApp {
                 outcome,
                 history,
             } => {
+                let mut speak_after = false;
                 if let Some(a) = self.open.get_mut(&session) {
                     a.run = None;
                     match outcome {
                         Ok(done) => {
                             a.session.history = history;
+                            speak_after = matches!(done.end, crate::agent::TurnEnd::Finished);
                             use crate::agent::TurnEnd;
                             match done.end {
                                 TurnEnd::Finished => a.log_info("Task finished"),
@@ -675,6 +737,34 @@ impl GagentApp {
                 self.save_session(&session);
                 self.refresh_changes_for(&session);
                 self.refresh_engines_if_idle();
+                if speak_after {
+                    self.speak_last_answer(&session);
+                }
+            }
+            Msg::Transcribed { session, result } => {
+                self.voice_status = None;
+                match result {
+                    Ok(text) => {
+                        if let Some(a) = self.open.get_mut(&session) {
+                            if !a.input.trim().is_empty() {
+                                a.input.push(' ');
+                            }
+                            a.input.push_str(&text);
+                            a.focus_input = true;
+                        }
+                    }
+                    Err(e) => self.show_banner(e, true),
+                }
+            }
+            Msg::Spoken(result) => {
+                self.voice_status = None;
+                match result {
+                    Ok(wav) => match crate::speech::play(&wav, &self.dirs.root().join("voice")) {
+                        Ok(p) => self.playback = Some(p),
+                        Err(e) => self.show_banner(e, true),
+                    },
+                    Err(e) => self.show_banner(e, true),
+                }
             }
             Msg::Changes { session, changes } => {
                 let mut again = false;
@@ -885,6 +975,9 @@ impl GagentApp {
                 self.banner = None;
             }
         }
+        if self.playback.as_mut().is_some_and(|p| p.is_done()) {
+            self.playback = None;
+        }
         let due: Vec<String> = self
             .open
             .iter()
@@ -908,6 +1001,9 @@ impl GagentApp {
             || self.docker_checking
             || self.building_image
             || self.models_loading
+            || self.recording.is_some()
+            || self.voice_status.is_some()
+            || self.playback.is_some()
             || self.banner.is_some();
         if busy {
             self.notify

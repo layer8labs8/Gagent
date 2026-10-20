@@ -130,19 +130,21 @@ pub fn sidebar(app: &mut GagentApp, ui: &mut egui::Ui) {
                 app.current = None;
                 app.project_draft = None;
             }
-            ui.add_space(6.0);
-            let new_project = ui.add(
-                egui::Button::new(RichText::new("+  New project").color(theme::accent()).strong())
-                    .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, theme::border()))
-                    .corner_radius(CornerRadius::same(10))
-                    .min_size(Vec2::new(ui.available_width(), 34.0)),
-            )
-            .on_hover_text("Several AI agents build something together");
-            if new_project.clicked() {
+            ui.add_space(4.0);
+            let by_hand = ui
+                .add(
+                    egui::Button::new(
+                        RichText::new("Choose the team by hand")
+                            .small()
+                            .color(theme::faint()),
+                    )
+                    .frame(false),
+                )
+                .on_hover_text("Usually not needed: describe a big job in a session and the lead plans it and picks the AIs. Here you pick every agent yourself.");
+            if by_hand.clicked() {
                 app.open_project_draft();
             }
-            ui.add_space(10.0);
+            ui.add_space(8.0);
 
             Panel::bottom("sidebar_footer")
                 .resizable(false)
@@ -512,11 +514,11 @@ pub fn chat(app: &mut GagentApp, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(16, 8)),
         )
         .show(ui, |ui| {
+            // One message box for everything; a team's controls sit above it.
             if is_team {
-                super::project::bar(app, ui)
-            } else {
-                composer(app, ui)
+                super::project::bar(app, ui);
             }
+            composer(app, ui)
         });
 
     let Some(id) = app.current.clone() else {
@@ -1048,6 +1050,9 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
     let mut toggle_auto = false;
     let mut new_provider: Option<crate::config::Provider> = None;
     let mut new_permission: Option<crate::config::PermissionMode> = None;
+    let mut new_team_mode: Option<crate::config::TeamMode> = None;
+    let mut toggle_mic = false;
+    let mut stop_voice = false;
 
     ui.vertical_centered(|ui| {
         ui.allocate_ui_with_layout(
@@ -1128,6 +1133,62 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                             );
                             if attach_button.clicked() {
                                 attach = true;
+                            }
+                            let listening = app.recording.as_ref().map(|(_, r)| r.seconds());
+                            let voice_busy = app.voice_status.clone();
+                            let ink = if listening.is_some() {
+                                theme::on_accent()
+                            } else {
+                                theme::muted()
+                            };
+                            let mic_button = round_button(
+                                ui,
+                                30.0,
+                                if listening.is_some() {
+                                    theme::err()
+                                } else {
+                                    Color32::TRANSPARENT
+                                },
+                                Stroke::new(1.0, theme::border()),
+                                ready && (voice_busy.is_none() || listening.is_some()),
+                                move |p, c| {
+                                    let s = Stroke::new(1.5, ink);
+                                    p.rect_filled(
+                                        egui::Rect::from_center_size(
+                                            c + Vec2::new(0.0, -3.0),
+                                            Vec2::new(6.0, 10.0),
+                                        ),
+                                        CornerRadius::same(3),
+                                        ink,
+                                    );
+                                    p.line_segment([c + Vec2::new(-5.0, -1.0), c + Vec2::new(-5.0, 1.5)], s);
+                                    p.line_segment([c + Vec2::new(-5.0, 1.5), c + Vec2::new(-2.5, 4.5)], s);
+                                    p.line_segment([c + Vec2::new(-2.5, 4.5), c + Vec2::new(2.5, 4.5)], s);
+                                    p.line_segment([c + Vec2::new(2.5, 4.5), c + Vec2::new(5.0, 1.5)], s);
+                                    p.line_segment([c + Vec2::new(5.0, 1.5), c + Vec2::new(5.0, -1.0)], s);
+                                    p.line_segment([c + Vec2::new(0.0, 4.5), c + Vec2::new(0.0, 8.0)], s);
+                                },
+                            )
+                            .on_hover_text(if listening.is_some() {
+                                "Stop: what you said is written into the message box"
+                            } else {
+                                "Speak: click, talk, click again. The sound is sent to the AI service to be written down, and not kept."
+                            });
+                            if mic_button.clicked() {
+                                toggle_mic = true;
+                            }
+                            if let Some(secs) = listening {
+                                ui.label(
+                                    RichText::new(format!("Listening... {secs}s"))
+                                        .small()
+                                        .color(theme::err()),
+                                );
+                            } else if let Some(status) = &voice_busy {
+                                ui.label(RichText::new(status).small().color(theme::muted()));
+                            } else if app.playback.is_some()
+                                && ui.small_button("Stop voice").clicked()
+                            {
+                                stop_voice = true;
                             }
                             let auto = app.settings.auto_pick;
                             if ui
@@ -1216,6 +1277,28 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                                 .response
                                 .on_hover_text(
                                     "When the agent asks before it runs a command (installing packages, stopping programs, files outside the project). Dangerous commands are always refused.",
+                                );
+                            let team_mode = app.settings.team_mode;
+                            egui::ComboBox::from_id_salt("team_mode_combo")
+                                .selected_text(
+                                    RichText::new(team_mode.short_label())
+                                        .small()
+                                        .color(theme::muted()),
+                                )
+                                .width(100.0)
+                                .show_ui(ui, |ui| {
+                                    for mode in crate::config::TeamMode::ALL {
+                                        if ui
+                                            .selectable_label(mode == team_mode, mode.label())
+                                            .clicked()
+                                        {
+                                            new_team_mode = Some(mode);
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "A big job (an app, a site, a long list) is planned by a lead and done by several AIs. You can also start a message with /team or /solo.",
                                 );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if running {
@@ -1339,6 +1422,12 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
             app.commit_settings(s);
         }
     }
+    if let Some(mode) = new_team_mode {
+        if mode != app.settings.team_mode {
+            app.settings.team_mode = mode;
+            app.save_settings();
+        }
+    }
     if let Some(mode) = new_permission {
         if mode != app.settings.permission {
             let mut s = app.settings.clone();
@@ -1357,6 +1446,12 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
     if hide_star {
         app.settings.star_hint_hidden = true;
         app.save_settings();
+    }
+    if toggle_mic {
+        app.toggle_recording();
+    }
+    if stop_voice {
+        app.stop_voice();
     }
     if stop {
         app.stop_run();

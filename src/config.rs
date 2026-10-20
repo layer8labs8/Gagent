@@ -8,14 +8,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::util::unique_id;
 
-/// Default Gemini model used when nothing else is configured.
-pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+/// Default Gemini model used when nothing else is configured (an alias that always points at a
+/// model that exists).
+pub const DEFAULT_MODEL: &str = "gemini-flash-latest";
 
 /// Models offered in the UI before the live model list has been fetched.
 pub const PRESET_MODELS: &[&str] = &[
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
 ];
 
 /// Default NVIDIA model (an id from build.nvidia.com).
@@ -53,6 +55,39 @@ pub const GROQ_AUTO_REQUESTS_PER_MINUTE: u32 = 25;
 
 /// Default sandbox image tag built from the bundled Dockerfile.
 pub const DEFAULT_SANDBOX_IMAGE: &str = "gagent-sandbox:latest";
+
+/// When a message becomes a team project: the lead plans, several AIs do the tasks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TeamMode {
+    /// Big jobs (an app, a site, a long list of wishes) go to a team, small ones to one agent.
+    #[default]
+    Auto,
+    /// Every message is planned and given to a team.
+    Always,
+    /// Every message goes to one agent.
+    Never,
+}
+
+impl TeamMode {
+    pub const ALL: [TeamMode; 3] = [TeamMode::Auto, TeamMode::Always, TeamMode::Never];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TeamMode::Auto => "Auto: big jobs go to a team",
+            TeamMode::Always => "Always a team",
+            TeamMode::Never => "Never: one agent",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            TeamMode::Auto => "Team: auto",
+            TeamMode::Always => "Team: on",
+            TeamMode::Never => "Team: off",
+        }
+    }
+}
 
 /// Which AI service the agent talks to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +486,14 @@ pub struct Settings {
     pub trusted_folders: Vec<String>,
     /// The small "a star on GitHub helps" line under the message box was hidden by the user.
     pub star_hint_hidden: bool,
+    /// When a message is planned and given to a team of AIs.
+    pub team_mode: TeamMode,
+    /// Start the plan of a team without waiting for the user's yes.
+    pub team_auto_start: bool,
+    /// Read the answers aloud (a Gemini voice).
+    pub speak_answers: bool,
+    /// The language the user speaks to the microphone (`az`, `tr`, `en`...); empty finds it out.
+    pub voice_language: String,
 }
 
 impl Default for Settings {
@@ -486,6 +529,10 @@ impl Default for Settings {
             last_project: String::new(),
             trusted_folders: Vec::new(),
             star_hint_hidden: false,
+            team_mode: TeamMode::Auto,
+            team_auto_start: false,
+            speak_answers: false,
+            voice_language: String::new(),
         }
     }
 }
@@ -526,7 +573,8 @@ impl Settings {
         let Ok(text) = fs::read_to_string(&path) else {
             return Settings::default();
         };
-        match serde_json::from_str::<Settings>(&text) {
+        // A file saved by Notepad starts with a byte order mark; that is not a damaged file.
+        match serde_json::from_str::<Settings>(text.trim_start_matches('\u{feff}')) {
             Ok(mut s) => {
                 s.normalize();
                 s
@@ -991,6 +1039,23 @@ mod trusted_folder_tests {
         if cfg!(windows) {
             assert!(s.is_trusted(r"c:\work\app"));
         }
+    }
+
+    #[test]
+    fn a_settings_file_with_a_byte_order_mark_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let dirs = AppDirs::at(dir.path());
+        dirs.ensure().unwrap();
+        std::fs::write(
+            dirs.settings_file(),
+            "\u{feff}{\"provider\":\"groq\",\"last_project\":\"x\"}",
+        )
+        .unwrap();
+        let s = Settings::load(&dirs);
+        assert_eq!(s.provider, Provider::Groq);
+        assert_eq!(s.last_project, "x");
+        // Nothing was moved aside as damaged.
+        assert!(dirs.settings_file().exists());
     }
 
     #[test]
