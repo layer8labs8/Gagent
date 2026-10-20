@@ -170,6 +170,9 @@ impl Store {
             return "  not available".to_string();
         }
         if !entries.is_empty() && entries.iter().all(|e| e.blocked_until > now) {
+            if entries.iter().all(|e| e.block_reason.contains("blocked in your account")) {
+                return "  blocked in your account".to_string();
+            }
             let left = entries.iter().map(|e| e.blocked_until - now).min().unwrap_or(0);
             return if left >= 3600 {
                 format!("  out of quota ~{}h", left / 3600)
@@ -383,6 +386,8 @@ mod tests {
         s.record_limited("h", "m", 5 * 3600, "daily quota", NOW);
         assert_eq!(s.blocked_for("h", "m", NOW + 60), Some(5 * 3600 - 60));
         assert_eq!(s.hint("m", NOW + 60), "  out of quota ~4h");
+        s.record_limited("h", "locked", 600, "The model is blocked in your account's project: enable it", NOW);
+        assert_eq!(s.hint("locked", NOW + 60), "  blocked in your account");
         assert_eq!(s.blocked_for("h", "m", NOW + 6 * 3600), None);
         assert_eq!(s.hint("m", NOW + 6 * 3600), "  ~2.0s");
         // The same model name at another service is not blocked.

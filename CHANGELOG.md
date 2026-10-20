@@ -4,6 +4,17 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **Auto is the default.** New installs choose the model by themselves for every message (turn it off next to the message box).
+- **Tokens per company.** The header of a session shows how many tokens it used and how they split between Gemini, NVIDIA, Groq
+  and any other server you added (Settings → AI model → OpenAI-compatible: OpenRouter, DeepSeek, Mistral, Ollama...).
+- **Pictures in the message.** A picture attached to a message (the + button, or drop it on the window) is sent along with it; with
+  Auto, a model that can see is chosen for that message.
+- A small line after the first answer says a star on GitHub helps; one click hides it for good.
+- **Groq models updated** to the ones the service lists today (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`). A
+  model that is blocked in your Groq project (console.groq.com/settings/project/limits) is shown as "blocked in your account" and
+  skipped, without spoiling the other models of the service.
+- The agent is told to write the user's language with its own letters (for Azerbaijani: ə ı ö ü ğ ş ç).
+
 - **Notes for the agent.** A `GAGENT.md` (or `AGENTS.md`) in the project root is read at the start of every task: how to build and
   test, conventions, things to avoid.
 

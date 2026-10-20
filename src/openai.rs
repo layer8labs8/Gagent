@@ -179,6 +179,10 @@ impl OpenAiClient {
 }
 
 impl ModelClient for OpenAiClient {
+    fn company(&self) -> String {
+        crate::usage::company_of(&self.base_url)
+    }
+
     fn generate(
         &self,
         model: &str,

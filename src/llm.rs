@@ -36,6 +36,12 @@ pub trait ModelClient: Send + Sync {
     fn serving_model(&self) -> Option<String> {
         None
     }
+
+    /// The company that answers the requests (`Gemini`, `NVIDIA`, `Groq`, or the host of another
+    /// server), for the count of tokens per company.
+    fn company(&self) -> String {
+        String::new()
+    }
 }
 
 impl ModelClient for GeminiClient {
@@ -51,6 +57,10 @@ impl ModelClient for GeminiClient {
 
     fn list_models(&self) -> Result<Vec<ModelInfo>, ApiError> {
         GeminiClient::list_models(self)
+    }
+
+    fn company(&self) -> String {
+        "Gemini".to_string()
     }
 }
 

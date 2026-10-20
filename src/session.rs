@@ -44,6 +44,9 @@ pub struct SessionMeta {
     /// Set for a team project: the goal and the agents.
     #[serde(default)]
     pub team: Option<crate::team::TeamConfig>,
+    /// Tokens used in this session, per company (`Gemini`, `NVIDIA`, `Groq`...).
+    #[serde(default)]
+    pub spent: std::collections::BTreeMap<String, u64>,
 }
 
 /// A conversation: what the user sees plus the raw Gemini history.
@@ -71,6 +74,7 @@ impl Session {
                 created_at: now,
                 updated_at: now,
                 team: None,
+                spent: Default::default(),
             },
             items: Vec::new(),
             history: Vec::new(),

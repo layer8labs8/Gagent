@@ -683,3 +683,45 @@ fn a_model_that_only_sends_broken_calls_is_stopped() {
         count_parts(&history, "user", "functionResponse")
     );
 }
+
+#[test]
+fn pictures_attached_to_a_message_are_sent_with_it_to_a_model_that_can_see() {
+    let mut rig = rig(vec![]);
+    rig.ctx.vision = true;
+    // The first bytes make it a PNG picture.
+    let png = [0x89u8, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    fs::write(rig.ctx.work.root().join("shot.png"), png).unwrap();
+    fs::write(rig.ctx.work.root().join("notes.txt"), "hello").unwrap();
+    let mock = MockGemini::start(vec![text("It is a screenshot.")]);
+    let (_e, emit) = collect();
+    let mut history = Vec::new();
+    let r = run_turn(
+        &client(&mock),
+        &cfg(5),
+        &mut history,
+        "[Attached files in the workspace: shot.png, notes.txt]\n\nWhat is in the picture?",
+        &rig.ctx,
+        &emit,
+        &rig.cancel,
+    );
+    assert_eq!(r.end, TurnEnd::Finished);
+    let parts = history[0]["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2, "the text and the one picture: {parts:?}");
+    assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+    assert!(mock.received()[0].body.to_string().contains("inlineData"));
+
+    // A model that cannot see gets the text only.
+    rig.ctx.vision = false;
+    let mock = MockGemini::start(vec![text("I cannot see it.")]);
+    let mut history = Vec::new();
+    run_turn(
+        &client(&mock),
+        &cfg(5),
+        &mut history,
+        "[Attached files in the workspace: shot.png]\n\nWhat is it?",
+        &rig.ctx,
+        &emit,
+        &rig.cancel,
+    );
+    assert_eq!(history[0]["parts"].as_array().unwrap().len(), 1);
+}

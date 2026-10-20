@@ -748,6 +748,13 @@ fn settings_form(
                 );
             });
         }
+        if provider == crate::config::Provider::Openai {
+            ui.label(
+                RichText::new("Any service that speaks the OpenAI API works here: OpenRouter, DeepSeek, Mistral, Together, a server on your own computer (Ollama, LM Studio)... Enter its address, your key and a model name.")
+                    .small()
+                    .color(theme::faint()),
+            );
+        }
         field(ui, "API key", |ui| {
             ui.add(
                 egui::TextEdit::singleline(key)

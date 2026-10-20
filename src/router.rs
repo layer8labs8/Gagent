@@ -455,11 +455,15 @@ impl ModelClient for AutoClient {
                     if !e.should_try_another() {
                         return Err(e);
                     }
-                    let service_wide = matches!(
-                        &e,
-                        ApiError::Http { status: 401 | 403 | 500 | 502 | 503 | 504, .. }
-                    ) || (matches!(&e, ApiError::Http { status: 429, .. })
-                        && e.quota_block_secs().is_none());
+                    // One model that is blocked in the project settings does not spoil the others.
+                    let model_only = matches!(&e, ApiError::Http { status: 403, .. })
+                        && e.quota_block_secs().is_some();
+                    let service_wide = !model_only
+                        && (matches!(
+                            &e,
+                            ApiError::Http { status: 401 | 403 | 500 | 502 | 503 | 504, .. }
+                        ) || (matches!(&e, ApiError::Http { status: 429, .. })
+                            && e.quota_block_secs().is_none()));
                     if service_wide {
                         skipped.push(order[i].0);
                     }
@@ -496,6 +500,18 @@ impl ModelClient for AutoClient {
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
             .map(|(_, m)| m.clone())
+    }
+
+    fn company(&self) -> String {
+        let provider = self
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|(p, _)| *p);
+        provider.map_or_else(String::new, |p| {
+            crate::usage::company_of(&host_of(&self.settings, p))
+        })
     }
 }
 

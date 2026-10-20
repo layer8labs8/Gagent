@@ -589,6 +589,7 @@ fn chat_header(app: &mut GagentApp, ui: &mut egui::Ui) {
     let title = a.session.meta.title.clone();
     let project = a.session.meta.project.clone();
     let pending = a.changes.len();
+    let spent = crate::usage::summary(&a.session.meta.spent);
     Panel::top("chat_header")
         .resizable(false)
         .show_separator_line(true)
@@ -611,6 +612,14 @@ fn chat_header(app: &mut GagentApp, ui: &mut egui::Ui) {
                         .color(theme::faint()),
                 )
                 .on_hover_text(&project);
+                if let Some(spent) = &spent {
+                    ui.label(
+                        RichText::new(truncate_end(spent, 70))
+                            .small()
+                            .color(theme::faint()),
+                    )
+                    .on_hover_text(format!("Used in this session: {spent}"));
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let label = if pending > 0 {
                         RichText::new(format!("Changes ({pending})"))
@@ -1025,6 +1034,16 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
     let mut stop = false;
     let mut attach = false;
     let mut remove_attachment: Option<String> = None;
+    // After the first answer, a small thank-you line (hidden for good with one click).
+    let show_star = !app.settings.star_hint_hidden
+        && app.open.get(&id).is_some_and(|a| {
+            a.run.is_none()
+                && a.session
+                    .items
+                    .iter()
+                    .any(|i| matches!(i, ChatItem::Assistant(_)))
+        });
+    let mut hide_star = false;
     let mut new_model: Option<String> = None;
     let mut toggle_auto = false;
     let mut new_provider: Option<crate::config::Provider> = None;
@@ -1272,6 +1291,22 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                             .size(11.0)
                             .color(theme::faint()),
                     );
+                    if show_star {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Did Gagent help? A star on GitHub helps others find it.")
+                                    .size(11.0)
+                                    .color(theme::faint()),
+                            );
+                            ui.hyperlink_to(
+                                RichText::new("★ Star").size(11.0),
+                                "https://github.com/layer8labs8/Gagent",
+                            );
+                            if ui.small_button("Hide").clicked() {
+                                hide_star = true;
+                            }
+                        });
+                    }
                 });
             },
         );
@@ -1318,6 +1353,10 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
         {
             app.attach_files(files);
         }
+    }
+    if hide_star {
+        app.settings.star_hint_hidden = true;
+        app.save_settings();
     }
     if stop {
         app.stop_run();
