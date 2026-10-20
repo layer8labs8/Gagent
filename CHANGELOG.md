@@ -2,6 +2,11 @@
 
 All notable changes to Gagent. The newest version is first.
 
+## Unreleased
+
+- A plain **Disclaimer** section in the README and a sixth license term: Gagent is a free tool that runs on your own computer with
+  your own keys; the authors run no server, collect nothing and owe no support.
+
 ## 0.2.0
 
 ### New
