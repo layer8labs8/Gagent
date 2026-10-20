@@ -4,6 +4,12 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **Git checkpoint, diff and commit.** When the project is a git repository, Gagent saves a checkpoint of it right before the agent's
+  changes reach it (a commit object under `refs/gagent/`: your branch, index and files are not touched, and the newest 20 are kept).
+  The Changes panel has a Git box: the branch, how many files are not committed, **Show git diff** for the files the agent changed,
+  and **Commit...** which commits those files only (your own uncommitted work stays as it is). The command line prints the
+  checkpoint too. Turn it off in Settings.
+
 - **One window for everything.** There is no separate "project" any more. Write what you want in a session: a small job goes to
   one agent, a big one (an app, a site, a long list of wishes) is planned by a lead, the AIs that fit are chosen automatically
   (Auto) and the team starts after your yes. The plan and the tasks sit above the message box. `Team: auto / on / off` next to the

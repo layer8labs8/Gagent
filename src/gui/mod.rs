@@ -463,6 +463,67 @@ impl GagentApp {
         std::thread::spawn(move || notify.send(Msg::Spoken(crate::speech::speak(&settings, &text))));
     }
 
+    /// Looks at the git repository of a session's project (in the background).
+    pub(crate) fn refresh_git(&mut self, session: &str) {
+        let Some(a) = self.open.get(session) else {
+            return;
+        };
+        let project = a.session.meta.project.clone();
+        let notify = self.notify.clone();
+        let session = session.to_string();
+        std::thread::spawn(move || {
+            let info = crate::gitops::info(std::path::Path::new(&project));
+            notify.send(Msg::Git { session, info });
+        });
+    }
+
+    /// The files the agent changed that git has not committed yet.
+    fn uncommitted_agent_files(&self, session: &str) -> Vec<String> {
+        let Some(a) = self.open.get(session) else {
+            return Vec::new();
+        };
+        let Some(g) = &a.git else {
+            return Vec::new();
+        };
+        a.applied.iter().filter(|f| g.changed.contains(*f)).cloned().collect()
+    }
+
+    /// Shows `git diff` of the agent's files.
+    pub(crate) fn git_show_diff(&mut self) {
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let files = self.uncommitted_agent_files(&id);
+        let Some(a) = self.open.get(&id) else {
+            return;
+        };
+        let project = a.session.meta.project.clone();
+        let notify = self.notify.clone();
+        std::thread::spawn(move || {
+            let text = crate::gitops::diff(std::path::Path::new(&project), &files, None)
+                .unwrap_or_else(|e| e);
+            notify.send(Msg::GitDiff { session: id, text });
+        });
+    }
+
+    /// Commits the files the agent changed, and nothing else.
+    pub(crate) fn git_commit(&mut self, message: String) {
+        let Some(id) = self.current.clone() else {
+            return;
+        };
+        let files = self.uncommitted_agent_files(&id);
+        let Some(a) = self.open.get(&id) else {
+            return;
+        };
+        let project = a.session.meta.project.clone();
+        let notify = self.notify.clone();
+        std::thread::spawn(move || {
+            let result = crate::gitops::commit(std::path::Path::new(&project), &files, &message)
+                .map(|hash| (hash, files.len()));
+            notify.send(Msg::Committed { session: id, result });
+        });
+    }
+
     pub(crate) fn stop_voice(&mut self) {
         if let Some(p) = self.playback.as_mut() {
             p.stop();
@@ -668,6 +729,7 @@ impl GagentApp {
                             start = std::mem::take(&mut t.start_when_ready);
                         }
                         self.refresh_changes_for(&session);
+                        self.refresh_git(&session);
                         if start {
                             self.start_team(&session, false);
                         }
@@ -722,6 +784,10 @@ impl GagentApp {
                                 }
                             }
                             if let Some(report) = done.auto_applied {
+                                a.applied.extend(report.applied.iter().cloned());
+                                if report.checkpoint.is_some() {
+                                    a.checkpoint = report.checkpoint.clone();
+                                }
                                 let text = apply_summary(&report);
                                 a.session.items.push(crate::session::ChatItem::Notice(text));
                             }
@@ -736,6 +802,7 @@ impl GagentApp {
                 }
                 self.save_session(&session);
                 self.refresh_changes_for(&session);
+                self.refresh_git(&session);
                 self.refresh_engines_if_idle();
                 if speak_after {
                     self.speak_last_answer(&session);
@@ -808,7 +875,49 @@ impl GagentApp {
                 self.show_banner(text, !ok);
                 self.save_session(&session);
                 self.refresh_changes_for(&session);
+                self.refresh_git(&session);
             }
+            Msg::AppliedFiles {
+                session,
+                files,
+                checkpoint,
+            } => {
+                if let Some(a) = self.open.get_mut(&session) {
+                    a.applied.extend(files);
+                    if checkpoint.is_some() {
+                        a.checkpoint = checkpoint;
+                    }
+                }
+            }
+            Msg::Git { session, info } => {
+                if let Some(a) = self.open.get_mut(&session) {
+                    a.git = info;
+                }
+            }
+            Msg::GitDiff { session, text } => {
+                if let Some(a) = self.open.get_mut(&session) {
+                    a.git_diff = Some(text);
+                }
+            }
+            Msg::Committed { session, result } => match result {
+                Ok((hash, n)) => {
+                    let text = format!("Committed {n} file(s) as {hash}.");
+                    if let Some(a) = self.open.get_mut(&session) {
+                        a.applied.clear();
+                        a.commit_draft = None;
+                        a.git_diff = None;
+                        a.log_info(&text);
+                        a.session
+                            .items
+                            .push(crate::session::ChatItem::Notice(text.clone()));
+                        a.scroll_to_bottom = true;
+                    }
+                    self.show_banner(text, false);
+                    self.save_session(&session);
+                    self.refresh_git(&session);
+                }
+                Err(e) => self.show_banner(format!("Could not commit: {e}"), true),
+            },
             Msg::Docker(status) => {
                 self.docker_checking = false;
                 self.docker = Some(status);
@@ -1032,6 +1141,9 @@ impl GagentApp {
 /// One-line summary of an apply operation.
 pub fn apply_summary(report: &crate::shadow::ApplyReport) -> String {
     let mut text = format!("Applied {} file(s) to your project.", report.applied.len());
+    if let Some(c) = &report.checkpoint {
+        text.push_str(&format!(" Git checkpoint {c} saved before the changes."));
+    }
     if !report.skipped.is_empty() {
         text.push_str(&format!(
             " Skipped {}: {}",

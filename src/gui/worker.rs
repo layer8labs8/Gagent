@@ -179,7 +179,14 @@ pub fn apply(
 ) {
     thread::spawn(move || {
         let (text, ok) = match engine.apply(&rels, force) {
-            Ok(report) => (apply_summary(&report), report.skipped.is_empty()),
+            Ok(report) => {
+                notify.send(Msg::AppliedFiles {
+                    session: session.clone(),
+                    files: report.applied.clone(),
+                    checkpoint: report.checkpoint.clone(),
+                });
+                (apply_summary(&report), report.skipped.is_empty())
+            }
             Err(e) => (format!("Could not apply the changes: {e:#}"), false),
         };
         notify.send(Msg::Applied { session, text, ok });

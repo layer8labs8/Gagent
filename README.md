@@ -97,6 +97,9 @@ tells you what it needs.
   over by another agent. A board above the message box shows every task and who does it; the Changes tab shows the result. Start a
   message with `/team` or `/solo` to decide yourself, or use `Team: auto / on / off` next to the message box. Choosing every agent by
   hand is possible too, and from the command line there is `gagent-cli team`.
+- **Git, if your project uses it.** Before the agent's changes reach your project, Gagent saves a checkpoint (under `refs/gagent/`,
+  so your branch and files are untouched). The Changes panel shows the branch, the git diff of the agent's files, and a Commit button
+  that commits those files only. Every apply also keeps a file backup you can undo.
 - **Pictures and voice.** Attach a picture to a message and a model that can see answers it. The microphone button writes what you say
   into the message box (Groq's Whisper or a Gemini model; the sound is not kept), and Settings can read the answers aloud.
 - **Tokens per company.** The header of a session shows how many tokens it used, split between Gemini, NVIDIA, Groq and any other

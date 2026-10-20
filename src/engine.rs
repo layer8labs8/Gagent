@@ -113,7 +113,15 @@ impl Engine {
 
     pub fn apply(&self, rels: &[String], force: bool) -> Result<ApplyReport> {
         let backups = self.dirs.backups_dir(&self.session_id);
-        self.lock_shadow().apply(rels, &backups, force)
+        // The project is about to change: a git checkpoint of it first, when it is a git project.
+        let checkpoint = if self.settings.git_checkpoint && !rels.is_empty() {
+            crate::gitops::checkpoint(&self.project_dir())
+        } else {
+            None
+        };
+        let mut report = self.lock_shadow().apply(rels, &backups, force)?;
+        report.checkpoint = checkpoint;
+        Ok(report)
     }
 
     pub fn apply_all(&self) -> Result<ApplyReport> {

@@ -494,6 +494,8 @@ pub struct Settings {
     pub speak_answers: bool,
     /// The language the user speaks to the microphone (`az`, `tr`, `en`...); empty finds it out.
     pub voice_language: String,
+    /// Save a git checkpoint of a git project before the agent's changes reach it.
+    pub git_checkpoint: bool,
 }
 
 impl Default for Settings {
@@ -533,6 +535,7 @@ impl Default for Settings {
             team_auto_start: false,
             speak_answers: false,
             voice_language: String::new(),
+            git_checkpoint: true,
         }
     }
 }
