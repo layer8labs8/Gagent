@@ -40,6 +40,7 @@ fn rig(results: Vec<ExecResult>) -> Rig {
             gagent::config::PermissionMode::Auto,
         )),
         reads: Default::default(),
+        vision: false,
     };
     Rig {
         _dir: dir,
@@ -616,5 +617,69 @@ fn the_size_of_a_request_does_not_grow_with_the_length_of_the_task() {
     assert!(
         total < 61 * 100_000,
         "{total} characters were sent in total"
+    );
+}
+
+#[test]
+fn a_model_that_keeps_failing_is_told_to_stop_and_read() {
+    let rig = rig(vec![
+        exec(1, "bash: foo: command not found"),
+        exec(1, "bash: bar: command not found"),
+        exec(1, "bash: baz: command not found"),
+    ]);
+    let mock = MockGemini::start(vec![
+        calls(vec![call("run_command", json!({"command": "foo"}))]),
+        calls(vec![call("run_command", json!({"command": "bar"}))]),
+        calls(vec![call("run_command", json!({"command": "baz"}))]),
+        text("I could not get it to run."),
+    ]);
+    let (_e, emit) = collect();
+    let mut history = Vec::new();
+    let r = run_turn(
+        &client(&mock),
+        &cfg(20),
+        &mut history,
+        "run it",
+        &rig.ctx,
+        &emit,
+        &rig.cancel,
+    );
+    assert_eq!(r.end, TurnEnd::Finished);
+    // The answer to the third failure carries the advice, the first two do not.
+    let sent = mock.received();
+    assert!(!sent[2].body.to_string().contains("in a row failed"));
+    assert!(sent[3].body.to_string().contains("3 tool calls in a row failed"));
+}
+
+#[test]
+fn a_model_that_only_sends_broken_calls_is_stopped() {
+    let rig = rig(vec![]);
+    let script = (0..12)
+        .map(|i| calls(vec![call("frobnicate", json!({ "n": i }))]))
+        .collect();
+    let mock = MockGemini::start(script);
+    let (_e, emit) = collect();
+    let mut history = Vec::new();
+    let r = run_turn(
+        &client(&mock),
+        &cfg(30),
+        &mut history,
+        "go",
+        &rig.ctx,
+        &emit,
+        &rig.cancel,
+    );
+    match r.end {
+        TurnEnd::Failed(m) => assert!(m.contains("malformed tool calls"), "{m}"),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(mock.received().len(), 8);
+    // The model was told which tools exist before the hard stop.
+    let sent = mock.received()[2].body.to_string();
+    assert!(sent.contains("run_command") && sent.contains("malformed"));
+    // History stays valid: calls and responses are paired.
+    assert_eq!(
+        count_parts(&history, "model", "functionCall"),
+        count_parts(&history, "user", "functionResponse")
     );
 }

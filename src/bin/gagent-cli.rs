@@ -51,12 +51,41 @@ enum Command {
         /// Disable network access inside the sandbox.
         #[arg(long)]
         no_network: bool,
+        /// Choose the best available model by itself (Gemini, NVIDIA, Groq), and move on when one runs out of quota.
+        #[arg(long)]
+        auto: bool,
         /// Do not ask before installs and other risky commands (dangerous ones stay refused).
         #[arg(long, conflicts_with = "ask")]
         yes: bool,
         /// Ask before every command.
         #[arg(long)]
         ask: bool,
+    },
+    /// Let a team of AI agents build something together: the lead plans, the others do the tasks.
+    Team {
+        /// What the team should build (not needed with --resume).
+        #[arg(default_value = "")]
+        goal: String,
+        /// The project folder.
+        #[arg(short, long, default_value = ".")]
+        folder: PathBuf,
+        /// One agent: provider:model[:role[:tokens]], for example
+        /// nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b:lead. Repeat for every agent. Roles: lead,
+        /// coder, tester, reviewer, docs.
+        #[arg(short = 'a', long = "agent", required_unless_present = "auto_team")]
+        agents: Vec<String>,
+        /// Make the team from the services that have a key (instead of --agent).
+        #[arg(long)]
+        auto_team: bool,
+        /// Copy the result into the project when the team is done.
+        #[arg(long)]
+        apply: bool,
+        /// Start without asking about the plan, and do not ask before installs and risky commands.
+        #[arg(long)]
+        yes: bool,
+        /// Continue the plan the project already has.
+        #[arg(long)]
+        resume: bool,
     },
     /// Check Docker, the API key and the sandbox image.
     Doctor {
@@ -94,11 +123,12 @@ fn main() -> ExitCode {
         Some(h) => AppDirs::at(h),
         None => AppDirs::default_location(),
     };
+    gagent::modelstats::init(dirs.root());
     let provider = match cli.provider.as_deref().map(Provider::from_name) {
         None => None,
         Some(Some(p)) => Some(p),
         Some(None) => {
-            eprintln!("error: unknown provider; use gemini, nvidia or openai");
+            eprintln!("error: unknown provider; use gemini, nvidia, groq or openai");
             return ExitCode::from(2);
         }
     };
@@ -110,6 +140,7 @@ fn main() -> ExitCode {
             apply,
             max_steps,
             no_network,
+            auto,
             yes,
             ask,
         } => {
@@ -121,9 +152,18 @@ fn main() -> ExitCode {
                 None
             };
             run_task(
-                &dirs, &task, &folder, provider, model, apply, max_steps, no_network, mode,
+                &dirs, &task, &folder, provider, model, apply, max_steps, no_network, mode, auto,
             )
         }
+        Command::Team {
+            goal,
+            folder,
+            agents,
+            auto_team,
+            apply,
+            yes,
+            resume,
+        } => team_project(&dirs, &goal, &folder, &agents, auto_team, apply, yes, resume),
         Command::Doctor { build_image, clean } => doctor(&dirs, provider, build_image, clean),
         Command::Models => models(&dirs, provider),
     };
@@ -134,6 +174,181 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// One line for a plan task.
+fn print_plan(plan: &gagent::team::Plan) {
+    eprintln!("\nPlan: {}", truncate_end(&plan.goal, 120));
+    if !plan.conventions.trim().is_empty() {
+        eprintln!("Contract:");
+        for line in plan.conventions.lines().take(12) {
+            eprintln!("   {}", truncate_end(line, 150));
+        }
+    }
+    eprintln!("Tasks:");
+    for t in &plan.tasks {
+        let deps = if t.deps.is_empty() {
+            String::new()
+        } else {
+            format!("  (after {})", t.deps.join(", "))
+        };
+        eprintln!(
+            "  {:<4} {:<10} {}{deps}",
+            t.id,
+            t.owner,
+            truncate_end(&t.title, 80)
+        );
+    }
+    eprintln!();
+}
+
+/// `--yes` and scripts start at once; at a terminal the person is asked.
+fn approve_plan(plan: &gagent::team::Plan, yes: bool) -> bool {
+    use std::io::{BufRead, IsTerminal, Write};
+    print_plan(plan);
+    if yes || !std::io::stdin().is_terminal() {
+        return true;
+    }
+    eprint!("Start this plan? [Y/n]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    if std::io::stdin().lock().read_line(&mut line).is_err() {
+        return false;
+    }
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn team_project(
+    dirs: &AppDirs,
+    goal: &str,
+    folder: &Path,
+    agents: &[String],
+    auto_team: bool,
+    apply: bool,
+    yes: bool,
+    resume: bool,
+) -> Result<ExitCode> {
+    use gagent::team::{AgentSpec, Status, Team, TeamEvent};
+    let mut settings = Settings::load(dirs);
+    settings.normalize();
+    let specs = if agents.is_empty() && auto_team {
+        gagent::router::refresh_live_models(&settings);
+        let made = gagent::router::suggest_team(&settings);
+        if made.is_empty() {
+            bail!("no AI service is ready: save a key in the app's settings or set GEMINI_API_KEY, NVIDIA_API_KEY or GROQ_API_KEY");
+        }
+        made
+    } else {
+        agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| AgentSpec::parse(a, i))
+            .collect::<std::result::Result<Vec<_>, String>>()
+            .map_err(|e| anyhow::anyhow!(e))?
+    };
+    let team = Team::new(specs).map_err(|e| anyhow::anyhow!(e))?;
+
+    if yes {
+        settings.permission = PermissionMode::All;
+    }
+    settings.normalize();
+    dirs.ensure()?;
+    let _instance = gagent::engine::claim_instance(dirs);
+
+    let session_id = unique_id();
+    eprintln!("Preparing a private copy of {} ...", folder.display());
+    let progress: sandbox::Progress = Arc::new(|line| eprintln!("   [sandbox] {line}"));
+    let engine = Engine::open(dirs, &settings, folder, &session_id, progress)?;
+    engine.approvals.set_responder(ask_on_terminal);
+    eprintln!("Team of {}:", team.agents.len());
+    for (i, a) in team.agents.iter().enumerate() {
+        eprintln!(
+            "  {:<9} {:<8} {} / {}{}",
+            a.name,
+            a.role.label(),
+            a.provider.label(),
+            a.model,
+            if i == team.lead { "   (lead)" } else { "" }
+        );
+    }
+
+    let emit = |event: TeamEvent| match event {
+        TeamEvent::Planning { lead, model } => eprintln!("\n{lead} ({model}) is planning ..."),
+        TeamEvent::PlanReady(_) => {}
+        TeamEvent::Resumed(plan) => {
+            eprintln!("\nContinuing the saved plan.");
+            print_plan(&plan);
+        }
+        TeamEvent::TaskStart { id, owner, title } => {
+            eprintln!("\n== {id}  {}  [{owner}]", truncate_end(&title, 80))
+        }
+        TeamEvent::Agent { event, .. } => match event {
+            AgentEvent::Status(_) | AgentEvent::Usage(_) | AgentEvent::FilesChanged => {}
+            AgentEvent::Notice(text) => eprintln!("   note: {text}"),
+            AgentEvent::Text(_) => {}
+            AgentEvent::ToolStart { summary, .. } => eprintln!("   >> {summary}"),
+            AgentEvent::ToolEnd { ok, summary, .. } => {
+                eprintln!("      {} {summary}", if ok { "ok  " } else { "FAIL" })
+            }
+        },
+        TeamEvent::TaskEnd {
+            status,
+            summary,
+            tokens,
+            ..
+        } => eprintln!("   -> {} ({tokens} tokens): {}", status.label(), truncate_end(&summary, 200)),
+        TeamEvent::Note(text) => eprintln!("Note: {text}"),
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let review = |plan: &gagent::team::Plan| approve_plan(plan, yes);
+    let (outcome, auto_applied) = engine.run_team(goal, &team, resume, &review, &emit, &cancel)?;
+
+    if outcome.declined {
+        eprintln!("The plan was not started.");
+    }
+    if let Some(report) = &auto_applied {
+        eprintln!("\nApplied {} file(s) to {}.", report.applied.len(), folder.display());
+    }
+    let plan = &outcome.plan;
+    eprintln!(
+        "\nTasks: {} done, {} failed, {} blocked, {} not started. Tokens used: {}.",
+        plan.count(Status::Done),
+        plan.count(Status::Failed),
+        plan.count(Status::Blocked),
+        plan.count(Status::Todo),
+        outcome.tokens
+    );
+    let changes = engine.changes()?;
+    let mut keep = !apply && !changes.is_empty() && auto_applied.is_none();
+    if apply && !changes.is_empty() {
+        let report = engine.apply_all()?;
+        eprintln!("Applied {} file(s) to {}", report.applied.len(), folder.display());
+        for (file, why) in &report.skipped {
+            eprintln!("  skipped {file}: {why}");
+            keep = true;
+        }
+    }
+    if keep || plan.count(Status::Done) < plan.tasks.len() {
+        eprintln!(
+            "The team's copy is kept at {}\nRun the same command with --resume to continue, or with --apply to write the result into your project.",
+            engine.work_dir().display()
+        );
+        keep = true;
+    }
+    engine.shutdown();
+    if !keep {
+        let _ = std::fs::remove_dir_all(dirs.shadow_dir(&session_id));
+    }
+    Ok(if outcome.cancelled {
+        ExitCode::from(130)
+    } else if outcome.declined {
+        ExitCode::from(5)
+    } else if plan.count(Status::Done) == plan.tasks.len() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(6)
+    })
 }
 
 /// Asks the person at the terminal. Without a terminal (a script, CI) the answer is no, so
@@ -174,8 +389,13 @@ fn run_task(
     max_steps: Option<u32>,
     no_network: bool,
     permission: Option<PermissionMode>,
+    auto: bool,
 ) -> Result<ExitCode> {
     let mut settings = Settings::load(dirs);
+    if auto {
+        settings.auto_pick = true;
+        gagent::router::refresh_live_models(&settings);
+    }
     if let Some(p) = provider {
         settings.provider = p;
     }
@@ -216,6 +436,7 @@ fn run_task(
 
     let emit = |event: AgentEvent| match event {
         AgentEvent::Status(_) | AgentEvent::Usage(_) | AgentEvent::FilesChanged => {}
+        AgentEvent::Notice(text) => eprintln!("note: {text}"),
         AgentEvent::Text(t) => println!("\n{t}\n"),
         AgentEvent::ToolStart { summary, .. } => eprintln!(">> {summary}"),
         AgentEvent::ToolEnd {
@@ -305,6 +526,7 @@ fn cli_setup_hint(settings: &Settings) -> String {
     match settings.provider {
         Provider::Gemini => "no Gemini API key: set GEMINI_API_KEY or save one in the desktop app's settings".into(),
         Provider::Nvidia => "no NVIDIA API key: set NVIDIA_API_KEY or save one in the desktop app's settings (create one at https://build.nvidia.com)".into(),
+        Provider::Groq => "no Groq API key: set GROQ_API_KEY or save one in the desktop app's settings (create one at https://console.groq.com/keys)".into(),
         Provider::Openai => "the OpenAI-compatible server is not set up: save its address and model in the desktop app's settings, or set GAGENT_OPENAI_BASE_URL and use --model".into(),
     }
 }

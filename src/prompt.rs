@@ -19,6 +19,8 @@ pub struct PromptInfo<'a> {
     pub wsl: bool,
     /// Commands run with bash directly on the user's own computer.
     pub host: bool,
+    /// The model can see pictures (`view_image` and `screenshot` are offered).
+    pub vision: bool,
     /// What the sandbox has installed (from a probe); empty when unknown.
     pub tools: &'a str,
 }
@@ -44,6 +46,12 @@ relative to the workspace root, for example `src/main.py`. Never use absolute pa
 - The user reviews your changes and applies them to the real project later, so you do not need to \
 ask permission before editing files.\n",
     );
+    if info.vision {
+        p.push_str(
+            "- You can see pictures. After you build a page or a window, use `screenshot` to look at it, and `view_image` \
+for pictures in the project. Judge the layout and looks, not only the text. A picture costs many tokens, so look when it helps.\n",
+        );
+    }
     if info.sandbox_available && !info.tools.is_empty() {
         p.push_str(&format!(
             "- Installed in the sandbox: {}. Anything not listed is NOT installed, and you cannot install system packages (no sudo, no apt); if a task needs one, say so in your answer.\n",
@@ -107,7 +115,8 @@ will fail. You can still read and edit files. Say clearly in your final answer t
 complete rewrites. Keep the existing style of the project.\n\
 3. Verify by running. After changing code, run it or its tests with `run_command` and read the output \
 carefully. If it fails, find the root cause in the logs, fix it, and run again. Repeat until it works or you \
-are genuinely blocked. Do not repeat the same failing action without changing something.\n\
+are genuinely blocked. Do not repeat the same failing action without changing something. Do not paste \
+multi-line code into `python -c` or `node -e` (quoting breaks): write a file and run it.\n\
 4. Never claim that something works unless you saw it work. Report failures honestly. For web pages, test the \
 JavaScript logic by running it (`node`, with the logic in functions and a few asserts) and check that every id and \
 class the script uses exists in the HTML.\n\
@@ -133,7 +142,12 @@ Reply in the language the user writes in.\n",
 
 /// A compact listing of the top of the project tree.
 fn overview(info: &PromptInfo) -> String {
-    let Ok(files) = walk_files(info.workspace.root(), info.opts) else {
+    project_overview(info.workspace, info.opts)
+}
+
+/// A compact listing of the top of a project tree.
+pub fn project_overview(workspace: &Workspace, opts: WalkOptions) -> String {
+    let Ok(files) = walk_files(workspace.root(), opts) else {
         return String::new();
     };
     if files.is_empty() {
@@ -184,6 +198,7 @@ mod tests {
             sandbox_available: sandbox,
             wsl: false,
             host: false,
+            vision: false,
         }
     }
 
@@ -230,6 +245,17 @@ mod tests {
         assert!(p.contains("on the user's own computer"), "{p}");
         assert!(p.contains("relative paths inside the workspace"));
         assert!(!p.contains("Ubuntu 24.04 sandbox"));
+    }
+
+    #[test]
+    fn a_model_that_can_see_is_told_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::new(dir.path()).unwrap();
+        let mut i = info(&ws, true, true);
+        assert!(!system_prompt(&i).contains("screenshot"));
+        i.vision = true;
+        let p = system_prompt(&i);
+        assert!(p.contains("`screenshot`") && p.contains("`view_image`"), "{p}");
     }
 
     #[test]

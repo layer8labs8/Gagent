@@ -116,6 +116,8 @@ impl Http {
         content_type: Option<&str>,
         body: &[u8],
     ) -> Result<Response, TransportError> {
+        // A server with a request limit (NVIDIA's free endpoint) makes every caller take a turn.
+        crate::ratelimit::wait_turn_for_url(url);
         let mut builder = ureq::http::Request::builder().method(method).uri(url);
         for (k, v) in headers {
             builder = builder.header(*k, *v);

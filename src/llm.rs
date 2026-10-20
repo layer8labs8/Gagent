@@ -25,6 +25,17 @@ pub trait ModelClient: Send + Sync {
 
     /// Lists the usable chat models. Doubles as an API key check.
     fn list_models(&self) -> Result<Vec<ModelInfo>, ApiError>;
+
+    /// Things the client wants the user to know ("model X is out of quota, Y answers instead").
+    /// Taken (and forgotten) by whoever calls it.
+    fn take_notices(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The model that answered last, when the client picks it itself (automatic choice).
+    fn serving_model(&self) -> Option<String> {
+        None
+    }
 }
 
 impl ModelClient for GeminiClient {
@@ -43,13 +54,29 @@ impl ModelClient for GeminiClient {
     }
 }
 
-/// Creates the client for the provider chosen in the settings.
+/// Creates the client for the settings: one that chooses the model itself when `auto_pick` is on,
+/// one that goes on with another model when the chosen one fails (`auto_failover`), or else the
+/// plain client of the chosen model.
 pub fn make_client(settings: &Settings) -> Arc<dyn ModelClient> {
+    use crate::router::{AutoClient, Mode};
+    let start = Some((settings.provider, settings.active_model().to_string()));
+    if settings.auto_pick {
+        return Arc::new(AutoClient::new(settings.clone(), Mode::Pick, start));
+    }
+    if settings.auto_failover {
+        return Arc::new(AutoClient::new(settings.clone(), Mode::Failover, start));
+    }
+    make_direct(settings)
+}
+
+/// The plain client of the provider and model chosen in the settings.
+pub fn make_direct(settings: &Settings) -> Arc<dyn ModelClient> {
     let key = settings.effective_api_key();
     let base = settings.api_base_url();
+    crate::ratelimit::configure(&crate::ratelimit::host_of(&base), settings.rate_limit());
     match settings.provider {
         Provider::Gemini => Arc::new(GeminiClient::new(&key, &base)),
-        Provider::Nvidia | Provider::Openai => Arc::new(
+        Provider::Nvidia | Provider::Groq | Provider::Openai => Arc::new(
             OpenAiClient::new(&key, &base, settings.max_output_tokens)
                 .with_tool_mode(settings.tool_mode),
         ),

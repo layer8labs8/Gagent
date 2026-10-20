@@ -14,6 +14,11 @@ work twice.
 - Commands run on your own computer (Git Bash on Windows) with guard rails; Docker and WSL are optional.
 - Asks before installs and risky commands (modes: Ask, Auto, Allow all).
 - Token savings: history compaction, short tool descriptions, cleaned output, token budget.
+- Switch provider and model from the message box in any session; tags show which models can see images, write code or reason.
+- One shared request limit per server (35 a minute on NVIDIA's free endpoint).
+- Screenshots and picture reading for models that can see.
+- Groq as a third service, and an automatic choice of the model (by what each does best and what is left of its limits), with a switch to the next model when one runs out of quota.
+- Team projects: a New project screen, a lead that writes the plan, agents that do the tasks one by one, a board, retry by another agent.
 
 ## Next
 
@@ -31,6 +36,12 @@ Small, concrete steps that make the daily use better.
 - **macOS** testing and a notarized build. *(help wanted)*
 - **Chat tools**: search and export sessions, rename, pin.
 - **Translations** of the interface. *(help wanted)*
+
+## Next: better team projects
+
+The design is in [docs/TEAM_MODE.md](docs/TEAM_MODE.md). The first version works; next come agents that work at the same time on separate
+copies (merged with the three-way merge), a repo map so that agents start from the structure instead of exploring, a tester and reviewer
+loop that turns problems into fix tasks, and a way to talk to the lead while the project runs.
 
 ## Later: many agents working together
 

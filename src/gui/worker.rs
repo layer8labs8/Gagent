@@ -69,6 +69,46 @@ pub fn load_models(notify: Notifier, settings: Settings) {
     });
 }
 
+/// Runs a team project on its own thread.
+#[allow(clippy::too_many_arguments)]
+pub fn run_team(
+    notify: Notifier,
+    session: String,
+    engine: Arc<Engine>,
+    team: crate::team::Team,
+    goal: String,
+    resume: bool,
+    gate: Arc<Gate>,
+    cancel: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let n = notify.clone();
+        let id = session.clone();
+        let emit = move |event| {
+            n.send(Msg::Team {
+                session: id.clone(),
+                event,
+            })
+        };
+        let review = |_plan: &crate::team::Plan| gate.wait(&cancel);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine.run_team(&goal, &team, resume, &review, &emit, &cancel)
+        }));
+        let outcome = match result {
+            Ok(Ok((done, applied))) => Ok(TeamSummary {
+                plan: done.plan,
+                tokens: done.tokens,
+                cancelled: done.cancelled,
+                declined: done.declined,
+                auto_applied: applied,
+            }),
+            Ok(Err(e)) => Err(format!("{e:#}")),
+            Err(_) => Err("The team crashed unexpectedly. Your files are safe; try again.".to_string()),
+        };
+        notify.send(Msg::TeamDone { session, outcome });
+    });
+}
+
 pub fn run_turn(
     notify: Notifier,
     session: String,
