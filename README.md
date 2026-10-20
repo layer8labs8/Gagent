@@ -15,7 +15,7 @@ Gemini · NVIDIA · Groq · any OpenAI-compatible API · one small native app ·
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 [![Stars](https://img.shields.io/github/stars/layer8labs8/Gagent?style=social)](https://github.com/layer8labs8/Gagent/stargazers)
 
-[Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Providers](#providers) · [Command line](#command-line) · [Roadmap](ROADMAP.md) · [Build](#build-from-source)
+[Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Disclaimer](#disclaimer-free-tool-use-at-your-own-risk) · [Providers](#providers) · [Command line](#command-line) · [Roadmap](ROADMAP.md) · [Build](#build-from-source)
 
 </div>
 
@@ -253,6 +253,24 @@ Follow along: [Instagram](https://www.instagram.com/layer8labs8) · [YouTube](ht
 
 Gagent is not affiliated with, endorsed by or sponsored by Google or NVIDIA. Gemini, Google AI Studio, NVIDIA, NIM and
 build.nvidia.com are names of their owners and are used only to say which services Gagent can talk to.
+
+## Disclaimer: free tool, use at your own risk
+
+Gagent is a free tool that one person built and shares as it is. It is not a service and not a product with a promise.
+
+- **It runs on your computer, with your keys.** You download it, you start it, you enter your own API keys and you choose the AI
+  services and models. The authors run no server, have no account system, collect no data and receive nothing from you: no files,
+  no keys, no usage numbers. They cannot see, stop or undo anything you do with it.
+- **The AI decides what to write and run, not the authors.** Models are made and operated by other companies (Google, NVIDIA, Groq
+  or whoever you connect). They can be wrong, and they can change files and run commands on your machine. What a model writes,
+  says or does is not the work, advice or action of the authors of Gagent, and neither are those companies responsible for Gagent.
+- **No warranty, no support, no liability.** Gagent is provided "as is". The authors are not responsible for lost or damaged
+  files, wrong or harmful code, security problems, costs, quotas or bans at AI services, downtime, or any other loss or damage,
+  however it arises. Nobody is obliged to fix a bug, answer a question or keep the project alive.
+- **You decide.** Use Gagent only if you accept this. If you do not, do not use it. Read the Changes before you apply them, keep a
+  backup, do not point it at data you may not share, and use Docker for projects you do not trust (see [SECURITY.md](SECURITY.md)).
+
+This is the position of the authors, written in plain words. It is not legal advice, and the binding text is the [LICENSE](LICENSE).
 
 ## License
 

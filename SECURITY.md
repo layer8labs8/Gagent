@@ -26,9 +26,20 @@ you use it on anything that matters.
 
 ## No warranty, no responsibility
 
-Gagent is provided as it is, free of charge, without any warranty (see `LICENSE`). The authors are not responsible for what the AI
-models write, say or do, for files that are changed or lost, for costs or quotas at the AI services, or for any other damage. You
-choose the models and you decide what to apply and what to run; you are responsible for that. This text is not legal advice.
+Gagent is a free tool, provided as it is and without any warranty (see `LICENSE`). The authors are not responsible for what the AI
+models write, say or do, for files that are changed or lost, for costs, quotas or bans at the AI services, or for any other
+damage. You choose the models and you decide what to apply and what to run; you are responsible for that. If you do not accept
+this, do not use Gagent.
+
+Who does what:
+
+- **You** install and start Gagent on your own computer, enter your own API keys and choose the services and models.
+- **The AI services** (Google, NVIDIA, Groq or the server you connect) receive what the agent reads and send back what the model
+  writes. They have their own terms and prices; you agree to those with them, not with us.
+- **The authors** share the source code and the programs. They run no server, collect nothing, see nothing of what you do, and
+  have no way to stop or undo it. They owe no support, updates or fixes.
+
+This text is not legal advice.
 
 ## Reporting a security problem
 
