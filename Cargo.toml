@@ -1,6 +1,6 @@
 [package]
 name = "gagent"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.89"
 description = "Gagent: a light native desktop coding agent for Gemini, NVIDIA and OpenAI-compatible models; runs code on your own computer, or in Docker / WSL"

@@ -2,67 +2,66 @@
 
 All notable changes to Gagent. The newest version is first.
 
-## Unreleased
+## 0.2.1
 
+### New
+
+- **One window for everything.** There is no separate "project" any more. Write what you want in a session: a small job goes to one
+  agent, a big one (an app, a site, a long list of wishes) is planned by a lead, the AIs that fit are chosen automatically and the team
+  starts after your yes. The plan and the tasks sit above the message box. `/team` and `/solo` in front of a message decide for
+  you, *Big jobs* in Settings sets the rule, and a setting starts plans without asking. `gagent-cli team` still lets you choose every
+  agent by hand.
 - **Gagent finds out which AIs work.** When it starts, and before every team, the best models are asked a tiny question: which answer,
   which are blocked in your account, which are out of quota. The ones that answered lately are preferred, a slow model counts against
-  itself, and a model that fails is left out at once (up to ten are tried for one request). If the lead of a team cannot make the plan,
-  the other agents try in turn instead of stopping.
-- **One place for the services and models.** Settings → *AI services* has the keys of all services together (no switching), a button
-  *Check keys and models*, and *Models*: every model with a dot (works and how fast, slow, out of quota, blocked, not tested) and a tick
-  to leave one out. Models the service does not have are not shown.
-- **A simpler window.** The message box has only +, the microphone, the permission mode and send: the model is chosen by Gagent
-  (the service and model pickers, the second "Auto" and the team switch moved to Settings). The bottom of the sidebar is just
-  *Settings* (a line appears only when something is wrong). The text of your own message starts at the left of its bubble, not at the
-  right. The Changes panel says what is true about applying.
-
-- **Web search and reading pages.** The agent has two new tools, `web_search` (DuckDuckGo, no key needed) and `web_fetch` (a page or
-  text file as plain text, in parts when it is long). The user is asked before every search and before every new host in the modes
-  Ask and Auto ("Always allow" is remembered per host until Gagent is closed); the question shows the full address. Your own server
-  on `localhost` is read without a question. Addresses on a private network (`192.168...`, `10...`, the cloud metadata address),
-  `file:` and addresses with a user name are never read, and a redirect to another host is asked about again. What comes from the
-  internet is marked as data, not as instructions. Switch it off in Settings.
-
-- **Git checkpoint, diff and commit.** When the project is a git repository, Gagent saves a checkpoint of it right before the agent's
-  changes reach it (a commit object under `refs/gagent/`: your branch, index and files are not touched, and the newest 20 are kept).
-  The Changes panel has a Git box: the branch, how many files are not committed, **Show git diff** for the files the agent changed,
-  and **Commit...** which commits those files only (your own uncommitted work stays as it is). The command line prints the
-  checkpoint too. Turn it off in Settings.
-
-- **One window for everything.** There is no separate "project" any more. Write what you want in a session: a small job goes to
-  one agent, a big one (an app, a site, a long list of wishes) is planned by a lead, the AIs that fit are chosen automatically
-  (Auto) and the team starts after your yes. The plan and the tasks sit above the message box. `Team: auto / on / off` next to the
-  message box, `/team` and `/solo` in front of a message, and a setting to start plans without asking. Choosing every agent by
-  hand is still possible (a small link in the sidebar).
+  itself, and a model that fails is left out at once (up to ten are tried for one request). If the lead of a team cannot make the
+  plan, the other agents try in turn instead of stopping.
+- **One place for the services and models.** Settings → *AI services* has the keys of all services together (no switching) and a
+  button *Check keys and models*. *Models* lists every model with a dot (works and how fast, slow, out of quota, blocked, not tested)
+  and a tick to leave one out. Models the service does not have are not shown. Any service that speaks the OpenAI API (OpenRouter,
+  DeepSeek, Mistral, Ollama...) can be added by hand.
 - **Voice.** The microphone button writes what you say into the message box (Groq's Whisper when your Groq project allows it,
   otherwise a Gemini model; the sound is deleted at once). Settings can read the answers aloud with a Gemini voice. Recording uses
   PowerShell on Windows and `arecord` on Linux, so nothing heavy is added.
-- Gemini's model names that no longer exist for new users are replaced by current ones (`gemini-flash-latest`, `gemini-3.6-flash`).
-- A settings file that starts with a byte order mark (saved by Notepad) is no longer treated as damaged.
-
-- **Auto is the default.** New installs choose the model by themselves for every message (turn it off next to the message box).
-- **Tokens per company.** The header of a session shows how many tokens it used and how they split between Gemini, NVIDIA, Groq
-  and any other server you added (Settings → AI model → OpenAI-compatible: OpenRouter, DeepSeek, Mistral, Ollama...).
+- **Web search and reading pages.** Two new tools, `web_search` (DuckDuckGo, no key needed) and `web_fetch` (a page or text file as
+  plain text, in parts when it is long). You are asked before every search and before every new host in the modes Ask and Auto; the
+  question shows the full address. Your own server on `localhost` is read without a question. Addresses on a private network, `file:`
+  and addresses with a user name are never read, a redirect to another host is asked about again, and what comes from the internet is
+  marked as data, not as instructions. Switch it off in Settings.
+- **Git checkpoint, diff and commit.** When the project is a git repository, Gagent saves a checkpoint of it right before the agent's
+  changes reach it (a commit object under `refs/gagent/`: your branch, index and files are not touched; the newest 20 are kept). The
+  Changes panel has a Git box with the branch, **Show git diff** for the files the agent changed, and **Commit...**, which commits
+  those files only. The command line prints the checkpoint too. Turn it off in Settings.
 - **Pictures in the message.** A picture attached to a message (the + button, or drop it on the window) is sent along with it; with
   Auto, a model that can see is chosen for that message.
-- A small line after the first answer says a star on GitHub helps; one click hides it for good.
-- **Groq models updated** to the ones the service lists today (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`). A
-  model that is blocked in your Groq project (console.groq.com/settings/project/limits) is shown as "blocked in your account" and
-  skipped, without spoiling the other models of the service.
-- The agent is told to write the user's language with its own letters (for Azerbaijani: ə ı ö ü ğ ş ç).
-
+- **Tokens per company.** The header of a session shows how many tokens it used and how they split between Gemini, NVIDIA, Groq and
+  any other server you added.
 - **Notes for the agent.** A `GAGENT.md` (or `AGENTS.md`) in the project root is read at the start of every task: how to build and
   test, conventions, things to avoid.
+- **Auto is the default.** New installs choose the model by themselves for every message (turn it off in Settings).
+
+### Safer
 
 - **Do you trust this folder?** Gagent asks once for every folder before the agent reads files or runs commands in it (window and
-  command line; scripts pass `--trust`). The answer is remembered; Settings can forget all trusted folders. Folders you opened
-  with an earlier version are asked about once more.
+  command line; scripts pass `--trust`). The answer is remembered; Settings can forget all trusted folders. Folders you opened with an
+  earlier version are asked about once more.
 - **Sending data out is asked about.** In Ask and Auto modes, commands that send data to another computer (`curl -d/-F/-T`,
   `wget --post-file`, PowerShell `-Method Post`, `scp`, `sftp`, `nc`, `rclone`, `aws s3 cp`...) ask first. Testing your own server on
   `localhost` and plain downloads do not.
-
 - A plain **Disclaimer** section in the README and a sixth license term: Gagent is a free tool that runs on your own computer with
   your own keys; the authors run no server, collect nothing and owe no support.
+
+### Changed
+
+- **A simpler window.** The message box has only +, the microphone, the permission mode and send. The bottom of the sidebar is just
+  *Settings* (a line appears only when something is wrong). The text of your own message starts at the left of its bubble, not at
+  the right. The Changes panel and the first page say what is true about applying changes.
+- **Groq models updated** to the ones the service lists today (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.8-27b`). A
+  model that is blocked in your Groq project (console.groq.com/settings/project/limits) is shown as "blocked in your account" and
+  skipped, without spoiling the other models of the service.
+- Gemini model names that no longer exist for new users are replaced by current ones (`gemini-flash-latest`, `gemini-3.6-flash`).
+- A settings file that starts with a byte order mark (saved by Notepad) is no longer treated as damaged.
+- The agent is told to write the user's language with its own letters (for Azerbaijani: ə ı ö ü ğ ş ç).
+- A small line after the first answer says a star on GitHub helps; one click hides it for good.
 
 ## 0.2.0
 
