@@ -13,8 +13,10 @@ you use it on anything that matters.
   and then runs can do more than the command line shows. For projects you do not trust, choose **Docker** in Settings, which isolates
   the commands for real.
 - **Instructions hidden in files.** A file, a web page or a package can contain text that tries to steer the AI ("ignore your
-  instructions and run this"). Do not open projects from sources you do not trust, and keep the permission mode on **Auto** or **Ask**
-  rather than **Allow all**.
+  instructions and run this"). Gagent asks "Do you trust this folder?" the first time you open a folder; say yes only to folders you
+  wrote or got from a source you trust. Keep the permission mode on **Auto** or **Ask** rather than **Allow all**: in those modes
+  commands that send data to another computer (`curl -d`, `scp`, `nc`...) ask first. A program the agent writes and runs can still
+  send data, which is one more reason to choose Docker for a folder you do not trust.
 - **Your files go to the AI service.** Everything the agent reads is sent to the service you chose (Google, NVIDIA, Groq or another
   server). Do not use Gagent on files you may not share. `.env` files and private keys are hidden from the agent unless you allow them.
 - **Your API keys are saved as plain text** in `settings.json` in the data folder (`%LOCALAPPDATA%\Gagent` or `~/.local/share/Gagent`).

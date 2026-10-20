@@ -4,6 +4,16 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **Notes for the agent.** A `GAGENT.md` (or `AGENTS.md`) in the project root is read at the start of every task: how to build and
+  test, conventions, things to avoid.
+
+- **Do you trust this folder?** Gagent asks once for every folder before the agent reads files or runs commands in it (window and
+  command line; scripts pass `--trust`). The answer is remembered; Settings can forget all trusted folders. Folders you opened
+  with an earlier version are asked about once more.
+- **Sending data out is asked about.** In Ask and Auto modes, commands that send data to another computer (`curl -d/-F/-T`,
+  `wget --post-file`, PowerShell `-Method Post`, `scp`, `sftp`, `nc`, `rclone`, `aws s3 cp`...) ask first. Testing your own server on
+  `localhost` and plain downloads do not.
+
 - A plain **Disclaimer** section in the README and a sixth license term: Gagent is a free tool that runs on your own computer with
   your own keys; the authors run no server, collect nothing and owe no support.
 

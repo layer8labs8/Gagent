@@ -111,6 +111,8 @@ tells you what it needs.
   shared by everything that uses the key. Change it in Settings.
 - **Changes tab**: per-file diff, apply selected or all, discard, undo, optional auto-apply.
 - **Quick checks** right after a file is written (Python, JavaScript, JSON syntax) so mistakes show up in the same step.
+- **Notes for the agent.** Put a `GAGENT.md` (or `AGENTS.md`) in your project: how to build and test, conventions, things to
+  avoid. The agent reads it at the start of every task (the first 4000 characters).
 - Sandbox tab, activity log, light and dark blue theme, drag and drop files into the workspace.
 - `gagent-cli` for scripts and headless use.
 
@@ -146,6 +148,11 @@ Commands run on your own computer by default, so Gagent is careful:
 
 - **Always refused**, in every mode: shutting down or restarting, formatting or partitioning disks, registry edits,
   `sudo`, `rm -rf` on the root or home folder, fork bombs, encoded PowerShell.
+- **Do you trust this folder?** The first time you open a folder, Gagent asks (the command line asks too; scripts pass
+  `--trust`). Files can hide instructions that try to steer the AI, so say yes only to folders you wrote or got from a
+  source you trust. Settings → Project files lists how many folders you trust and can forget them.
+- **Sending data out is asked about.** In Auto mode `curl -d/-F/-T`, `wget --post-file`, `scp`, `nc` and similar commands
+  that send data to another computer ask first; testing your own server on `localhost` does not.
 - **You are responsible for what you run.** AI models can be wrong, and Gagent is provided as it is, without warranty (see
   [LICENSE](LICENSE) and [SECURITY.md](SECURITY.md)). Read the Changes before you apply them, keep a backup, and do not open projects
   you do not trust.

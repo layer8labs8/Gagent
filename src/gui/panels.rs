@@ -918,6 +918,15 @@ fn settings_form(
             &mut d.share_secret_files,
             "Let the agent see secret files (.env, private keys)",
         );
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("Trusted folders: {}", d.trusted_folders.len()))
+                    .color(theme::muted()),
+            );
+            if !d.trusted_folders.is_empty() && ui.small_button("Forget all").clicked() {
+                d.trusted_folders.clear();
+            }
+        });
         ui.label(
             RichText::new(
                 "Everything the agent reads is sent to the selected AI service. Secret files are hidden by default.",
