@@ -60,6 +60,9 @@ enum Command {
         /// Ask before every command.
         #[arg(long)]
         ask: bool,
+        /// Work in this folder without asking whether you trust it (this run only).
+        #[arg(long)]
+        trust: bool,
     },
     /// Let a team of AI agents build something together: the lead plans, the others do the tasks.
     Team {
@@ -86,6 +89,9 @@ enum Command {
         /// Continue the plan the project already has.
         #[arg(long)]
         resume: bool,
+        /// Work in this folder without asking whether you trust it (this run only).
+        #[arg(long)]
+        trust: bool,
     },
     /// Check Docker, the API key and the sandbox image.
     Doctor {
@@ -143,6 +149,7 @@ fn main() -> ExitCode {
             auto,
             yes,
             ask,
+            trust,
         } => {
             let mode = if yes {
                 Some(PermissionMode::All)
@@ -152,7 +159,7 @@ fn main() -> ExitCode {
                 None
             };
             run_task(
-                &dirs, &task, &folder, provider, model, apply, max_steps, no_network, mode, auto,
+                &dirs, &task, &folder, provider, model, apply, max_steps, no_network, mode, auto, trust,
             )
         }
         Command::Team {
@@ -163,7 +170,8 @@ fn main() -> ExitCode {
             apply,
             yes,
             resume,
-        } => team_project(&dirs, &goal, &folder, &agents, auto_team, apply, yes, resume),
+            trust,
+        } => team_project(&dirs, &goal, &folder, &agents, auto_team, apply, yes, resume, trust),
         Command::Doctor { build_image, clean } => doctor(&dirs, provider, build_image, clean),
         Command::Models => models(&dirs, provider),
     };
@@ -228,6 +236,7 @@ fn team_project(
     apply: bool,
     yes: bool,
     resume: bool,
+    trust: bool,
 ) -> Result<ExitCode> {
     use gagent::team::{AgentSpec, Status, Team, TeamEvent};
     let mut settings = Settings::load(dirs);
@@ -253,6 +262,7 @@ fn team_project(
         settings.permission = PermissionMode::All;
     }
     settings.normalize();
+    ensure_trusted(dirs, &mut settings, folder, trust)?;
     dirs.ensure()?;
     let _instance = gagent::engine::claim_instance(dirs);
 
@@ -351,6 +361,42 @@ fn team_project(
     })
 }
 
+/// The agent works only in a folder the user trusts: files can hide instructions that steer the AI.
+/// At a terminal the person is asked once and the answer is remembered; a script passes `--trust`
+/// (for that run only).
+fn ensure_trusted(dirs: &AppDirs, settings: &mut Settings, folder: &Path, trust: bool) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let shown = dunce::canonicalize(folder)
+        .unwrap_or_else(|_| folder.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    if trust || settings.is_trusted(&shown) {
+        return Ok(());
+    }
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "{shown} is not a trusted folder yet. The agent would read its files and run commands on your computer, and files can hide instructions that steer the AI. Run again with --trust if you trust this folder."
+        );
+    }
+    eprintln!();
+    eprintln!("Do you trust this folder?  {shown}");
+    eprintln!("The agent will read its files and run commands on your computer. Files can hide instructions");
+    eprintln!("that steer the AI: continue only with a folder you wrote or got from a source you trust.");
+    eprint!("Trust it and remember? [y/N]: ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        bail!("the folder is not trusted; nothing was done");
+    }
+    // Saved from a fresh copy of the file, so options of this run are not stored with it.
+    let mut stored = Settings::load(dirs);
+    stored.trust_folder(&shown);
+    stored.save(dirs)?;
+    settings.trust_folder(&shown);
+    Ok(())
+}
+
 /// Asks the person at the terminal. Without a terminal (a script, CI) the answer is no, so
 /// that nothing is installed or touched behind anyone's back; use `--yes` to allow.
 fn ask_on_terminal(request: &AskRequest) -> Decision {
@@ -390,6 +436,7 @@ fn run_task(
     no_network: bool,
     permission: Option<PermissionMode>,
     auto: bool,
+    trust: bool,
 ) -> Result<ExitCode> {
     let mut settings = Settings::load(dirs);
     if auto {
@@ -415,6 +462,7 @@ fn run_task(
     if !settings.is_configured() {
         bail!("{}", cli_setup_hint(&settings));
     }
+    ensure_trusted(dirs, &mut settings, folder, trust)?;
     dirs.ensure()?;
     let _instance = gagent::engine::claim_instance(dirs);
 

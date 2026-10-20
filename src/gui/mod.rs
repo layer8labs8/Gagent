@@ -114,6 +114,8 @@ pub struct GagentApp {
     pub(crate) banner: Option<Banner>,
     pub(crate) new_project_path: String,
     pub(crate) confirm_delete: Option<String>,
+    /// The session whose folder waits for the answer to "do you trust this folder?".
+    pub(crate) trust_ask: Option<String>,
     started_engines: HashSet<String>,
     /// The questions of the agent ("may I install this?") wait here for the user.
     pub(crate) approvals: Arc<Approvals>,
@@ -161,6 +163,7 @@ impl GagentApp {
             banner: None,
             new_project_path: settings.last_project.clone(),
             confirm_delete: None,
+            trust_ask: None,
             started_engines: HashSet::new(),
             approvals,
             settings,
@@ -297,12 +300,33 @@ impl GagentApp {
 
     // ----- background work -------------------------------------------------
 
+    /// True when the user said the agent may work in this folder (the test driver always may).
+    fn folder_trusted(&self, project: &str) -> bool {
+        #[cfg(feature = "autopilot")]
+        {
+            if self.autopilot.is_some() {
+                return true;
+            }
+        }
+        self.settings.is_trusted(project)
+    }
+
     pub(crate) fn open_engine(&mut self, id: &str) {
+        let Some(project) = self.open.get(id).map(|a| a.session.meta.project.clone()) else {
+            return;
+        };
+        // Nothing opens in a folder the user has not trusted; the question comes first.
+        if !self.folder_trusted(&project) {
+            if let Some(active) = self.open.get_mut(id) {
+                active.engine = EngineState::None;
+            }
+            self.trust_ask = Some(id.to_string());
+            return;
+        }
         let Some(active) = self.open.get_mut(id) else {
             return;
         };
         active.engine = EngineState::Opening;
-        let project = active.session.meta.project.clone();
         self.started_engines.insert(id.to_string());
         worker::open_engine(
             self.notify.clone(),
@@ -948,6 +972,7 @@ impl eframe::App for GagentApp {
         panels::settings_window(self, ui.ctx());
         views::banner(self, ui.ctx());
         views::approval_card(self, ui.ctx());
+        views::trust_card(self, ui.ctx());
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

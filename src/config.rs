@@ -450,6 +450,8 @@ pub struct Settings {
     pub appearance: Appearance,
     /// Last project folder that was opened.
     pub last_project: String,
+    /// Folders the user said "I trust this folder" for. The agent does not work in any other.
+    pub trusted_folders: Vec<String>,
 }
 
 impl Default for Settings {
@@ -483,11 +485,40 @@ impl Default for Settings {
             sandbox: SandboxSettings::default(),
             appearance: Appearance::Auto,
             last_project: String::new(),
+            trusted_folders: Vec::new(),
         }
     }
 }
 
 impl Settings {
+    /// A folder path in the form used to compare folders (`C:\Work\App\` and `c:/work/app` are one folder on Windows).
+    fn folder_key(folder: &str) -> String {
+        let path = folder.trim().replace('\\', "/");
+        let path = path.trim_end_matches('/');
+        if cfg!(windows) {
+            path.to_ascii_lowercase()
+        } else {
+            path.to_string()
+        }
+    }
+
+    /// True when the user said the agent may work in this folder.
+    pub fn is_trusted(&self, folder: &str) -> bool {
+        let key = Self::folder_key(folder);
+        !key.is_empty()
+            && self
+                .trusted_folders
+                .iter()
+                .any(|t| Self::folder_key(t) == key)
+    }
+
+    /// Remembers that the user trusts this folder.
+    pub fn trust_folder(&mut self, folder: &str) {
+        if !folder.trim().is_empty() && !self.is_trusted(folder) {
+            self.trusted_folders.push(folder.trim().to_string());
+        }
+    }
+
     /// Loads settings; a missing or unreadable file yields defaults.
     /// A corrupt file is moved aside so the user does not lose it.
     pub fn load(dirs: &AppDirs) -> Settings {
@@ -926,5 +957,45 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o077, 0);
+    }
+}
+
+#[cfg(test)]
+mod trusted_folder_tests {
+    use super::*;
+
+    #[test]
+    fn a_trusted_folder_is_remembered_once() {
+        let mut s = Settings::default();
+        assert!(!s.is_trusted("/work/app"));
+        assert!(!s.is_trusted(""));
+        s.trust_folder("/work/app");
+        s.trust_folder("/work/app/");
+        assert!(s.is_trusted("/work/app"));
+        assert_eq!(s.trusted_folders.len(), 1);
+        // A folder next to it, or inside it, is a different folder.
+        assert!(!s.is_trusted("/work/app2"));
+        assert!(!s.is_trusted("/work/app/sub"));
+        assert!(!s.is_trusted("/work"));
+        s.trust_folder("   ");
+        assert_eq!(s.trusted_folders.len(), 1);
+    }
+
+    #[test]
+    fn slashes_and_case_do_not_matter_on_windows_paths() {
+        let mut s = Settings::default();
+        s.trust_folder(r"C:\Work\App");
+        assert!(s.is_trusted(r"C:\Work\App\"));
+        assert!(s.is_trusted("C:/Work/App"));
+        if cfg!(windows) {
+            assert!(s.is_trusted(r"c:\work\app"));
+        }
+    }
+
+    #[test]
+    fn old_settings_files_have_no_trusted_folders() {
+        let s: Settings = serde_json::from_str(r#"{"last_project":"x"}"#).unwrap();
+        assert!(s.trusted_folders.is_empty());
+        assert!(!s.is_trusted("x"));
     }
 }

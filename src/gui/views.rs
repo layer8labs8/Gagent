@@ -527,13 +527,20 @@ pub fn chat(app: &mut GagentApp, ui: &mut egui::Ui) {
     if let Some(a) = app.open.get(&id) {
         match &a.engine {
             EngineState::Opening | EngineState::None => {
+                let waiting = app.trust_ask.as_deref() == Some(id.as_str());
                 ui.add_space(30.0);
                 ui.vertical_centered(|ui| {
-                    theme::spinner(ui, 22.0);
+                    if !waiting {
+                        theme::spinner(ui, 22.0);
+                    }
                     ui.add_space(6.0);
                     ui.label(
-                        RichText::new("Preparing a private copy of your project...")
-                            .color(theme::muted()),
+                        RichText::new(if waiting {
+                            "Waiting for your answer: do you trust this folder?"
+                        } else {
+                            "Preparing a private copy of your project..."
+                        })
+                        .color(theme::muted()),
                     );
                 });
                 return;
@@ -1394,6 +1401,100 @@ pub fn approval_card(app: &mut GagentApp, ctx: &egui::Context) {
         });
     if let Some(d) = decision {
         app.approvals.answer(request.id, d);
+    }
+}
+
+/// "Do you trust this folder?", asked once for every folder. The agent does not open in it before.
+pub fn trust_card(app: &mut GagentApp, ctx: &egui::Context) {
+    let Some(id) = app.trust_ask.clone() else {
+        return;
+    };
+    let Some(project) = app.open.get(&id).map(|a| a.session.meta.project.clone()) else {
+        app.trust_ask = None;
+        return;
+    };
+    let mut answer: Option<bool> = None;
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Middle,
+        egui::Id::unique("trust_scrim"),
+    ))
+    .rect_filled(
+        ctx.content_rect(),
+        CornerRadius::ZERO,
+        egui::Color32::from_black_alpha(120),
+    );
+    egui::Area::new(egui::Id::unique("trust_card"))
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            Frame::new()
+                .fill(theme::card_bg())
+                .stroke(Stroke::new(1.5, theme::accent()))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::symmetric(18, 14))
+                .show(ui, |ui| {
+                    ui.set_width(520.0f32.min(ui.ctx().content_rect().width() - 60.0));
+                    ui.label(
+                        RichText::new("Do you trust this folder?")
+                            .size(18.0)
+                            .strong()
+                            .color(theme::text_strong()),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(truncate_end(&project, 90))
+                            .monospace()
+                            .size(12.5)
+                            .color(theme::text()),
+                    );
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("Gagent lets an AI read the files here and run commands on your computer. Files can hide instructions that try to steer the AI. Continue only with a folder you wrote yourself or got from a source you trust.")
+                                .color(theme::muted()),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new("For a folder you do not trust, choose Docker in Settings (Sandbox) first. See SECURITY.md.")
+                                .small()
+                                .color(theme::faint()),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Yes, I trust this folder")
+                                        .color(theme::on_accent()),
+                                )
+                                .fill(theme::accent()),
+                            )
+                            .clicked()
+                        {
+                            answer = Some(true);
+                        }
+                        if ui.button("No, do not open it").clicked() {
+                            answer = Some(false);
+                        }
+                    });
+                });
+        });
+    if let Some(yes) = answer {
+        app.trust_ask = None;
+        if yes {
+            app.settings.trust_folder(&project);
+            app.save_settings();
+            app.open_engine(&id);
+        } else if app.open.get(&id).is_some_and(|a| a.session.items.is_empty()) {
+            app.delete_session(&id);
+        } else if app.current.as_deref() == Some(id.as_str()) {
+            app.current = None;
+        }
     }
 }
 
