@@ -3,7 +3,9 @@
 //! what happened to a file. Built only with `--features autopilot`; never part of the release.
 //!
 //! Environment: `GAGENT_AUTOPILOT_FOLDER`, `_GOAL`, `_AGENTS` (specs separated by `;`),
-//! `_OUT` (result file) and `_SECONDS` (give up after this long).
+//! `_OUT` (result file) and `_SECONDS` (give up after this long). `_SHOTS` is a folder that gets a
+//! picture of the window every `_SHOT_EVERY` seconds (taken by the window itself, so nothing in
+//! front of it can get in), and `_OPEN=settings` opens the settings first.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,6 +21,8 @@ use crate::team::AgentSpec;
 #[derive(PartialEq)]
 enum Stage {
     Start,
+    /// Only take pictures (no folder was given).
+    Watch,
     /// The session of the unified flow is open; waiting for its workspace.
     Opened,
     Created,
@@ -36,12 +40,33 @@ pub struct Autopilot {
     plan_ready: Option<f32>,
     /// Test the unified flow: open a session, type the goal and press Enter, like a person.
     unified: bool,
+    /// A folder for pictures of the window.
+    shots: Option<PathBuf>,
+    shot_every: Duration,
+    last_shot: Instant,
+    shot_count: u32,
+    open_settings: bool,
 }
 
 impl Autopilot {
     pub fn from_env() -> Option<Self> {
-        let folder = std::env::var("GAGENT_AUTOPILOT_FOLDER").ok()?;
+        let shots = std::env::var("GAGENT_AUTOPILOT_SHOTS").ok().map(PathBuf::from);
+        let folder = match std::env::var("GAGENT_AUTOPILOT_FOLDER") {
+            Ok(f) => f,
+            Err(_) if shots.is_some() => String::new(),
+            Err(_) => return None,
+        };
         Some(Self {
+            shots,
+            shot_every: Duration::from_secs(
+                std::env::var("GAGENT_AUTOPILOT_SHOT_EVERY")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(20),
+            ),
+            last_shot: Instant::now(),
+            shot_count: 0,
+            open_settings: std::env::var("GAGENT_AUTOPILOT_OPEN").is_ok_and(|v| v == "settings"),
             started: Instant::now(),
             stage: Stage::Start,
             folder,
@@ -103,6 +128,80 @@ fn finish(app: &GagentApp, ap: &Autopilot, verdict: &str, code: i32) -> ! {
     std::process::exit(code);
 }
 
+/// Asks the window for a picture of itself when it is time, and saves it as a PNG file.
+fn take_pictures(app: &mut GagentApp, ap: &mut Autopilot) {
+    let Some(dir) = ap.shots.clone() else {
+        return;
+    };
+    if ap.last_shot.elapsed() < ap.shot_every || ap.started.elapsed() < Duration::from_secs(3) {
+        return;
+    }
+    ap.last_shot = Instant::now();
+    ap.shot_count += 1;
+    let n = ap.shot_count;
+    let ctx = app.notify.ctx.clone();
+    ctx.request_screenshot(move |image| {
+        let [w, h] = image.size;
+        let mut rgba = Vec::with_capacity(w * h * 4);
+        for p in &image.pixels {
+            rgba.extend_from_slice(&p.to_srgba_unmultiplied());
+        }
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join(format!("shot{n:02}.png")), png(w, h, &rgba));
+    });
+    ctx.request_repaint();
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for b in bytes {
+        crc ^= u32::from(*b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// A PNG file of an RGBA picture, without compression (large, but simple and always right).
+fn png(width: usize, height: usize, rgba: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::with_capacity((width * 4 + 1) * height);
+    for row in rgba.chunks(width * 4) {
+        raw.push(0);
+        raw.extend_from_slice(row);
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        z.extend_from_slice(&(block.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(!(block.len() as u16)).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for byte in &raw {
+        a = (a + u32::from(*byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    z.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let mut body = kind.to_vec();
+        body.extend_from_slice(data);
+        out.extend_from_slice(&body);
+        out.extend_from_slice(&crc32(&body).to_be_bytes());
+    };
+    let mut header = Vec::new();
+    header.extend_from_slice(&(width as u32).to_be_bytes());
+    header.extend_from_slice(&(height as u32).to_be_bytes());
+    header.extend_from_slice(&[8, 6, 0, 0, 0]);
+    chunk(b"IHDR", &header);
+    chunk(b"IDAT", &z);
+    chunk(b"IEND", &[]);
+    out
+}
+
 /// Called every frame.
 pub fn step(app: &mut GagentApp) {
     let Some(mut ap) = app.autopilot.take() else {
@@ -114,9 +213,24 @@ pub fn step(app: &mut GagentApp) {
     if ap.started.elapsed() > ap.limit {
         finish(app, &ap, "timeout", 3);
     }
+    take_pictures(app, &mut ap);
     match ap.stage {
+        Stage::Watch => {}
         Stage::Start => {
-            if ap.started.elapsed() > Duration::from_secs(2) {
+            if ap.started.elapsed() > Duration::from_secs(2) && ap.folder.is_empty() {
+                if ap.open_settings {
+                    app.draft = Some(app.settings.clone());
+                    app.settings_scroll = std::env::var("GAGENT_AUTOPILOT_SCROLL")
+                        .ok()
+                        .and_then(|v| v.parse().ok());
+                }
+                ap.stage = Stage::Watch;
+                app.autopilot = Some(ap);
+                return;
+            } else if ap.started.elapsed() > Duration::from_secs(2) {
+                if ap.open_settings {
+                    app.draft = Some(app.settings.clone());
+                }
                 // The test folder is the driver's own: it answers the trust question with yes.
                 if let Ok(path) = dunce::canonicalize(&ap.folder) {
                     app.settings.trust_folder(&path.to_string_lossy());

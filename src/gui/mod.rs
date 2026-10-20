@@ -105,8 +105,6 @@ pub struct GagentApp {
     pub(crate) models_loading: bool,
     pub(crate) key_status: Option<(bool, String)>,
     pub(crate) show_key: bool,
-    /// Offer every model of the provider in the picker, not only the chat models.
-    pub(crate) show_all_models: bool,
     /// The New project screen, while it is open.
     pub(crate) project_draft: Option<project::ProjectDraft>,
     #[cfg(feature = "autopilot")]
@@ -122,6 +120,10 @@ pub struct GagentApp {
     pub(crate) voice_status: Option<String>,
     /// An answer that is being read aloud.
     pub(crate) playback: Option<crate::speech::Playback>,
+    /// The models are being asked which ones work (the settings window shows a spinner).
+    pub(crate) checking_models: bool,
+    /// Scrolls the settings window to this height (set by the test driver for its pictures).
+    pub(crate) settings_scroll: Option<f32>,
     started_engines: HashSet<String>,
     /// The questions of the agent ("may I install this?") wait here for the user.
     pub(crate) approvals: Arc<Approvals>,
@@ -162,7 +164,6 @@ impl GagentApp {
             models_loading: false,
             key_status: None,
             show_key: false,
-            show_all_models: false,
             project_draft: None,
             #[cfg(feature = "autopilot")]
             autopilot: autopilot::Autopilot::from_env(),
@@ -173,6 +174,8 @@ impl GagentApp {
             recording: None,
             voice_status: None,
             playback: None,
+            checking_models: false,
+            settings_scroll: None,
             started_engines: HashSet::new(),
             approvals,
             settings,
@@ -185,7 +188,12 @@ impl GagentApp {
         {
             // Which models each service really has (names change); done in the background.
             let settings = app.settings.clone();
-            std::thread::spawn(move || crate::router::refresh_live_models(&settings));
+            std::thread::spawn(move || {
+                crate::router::refresh_live_models(&settings);
+                // A tiny question to the best models: which ones answer, which are blocked or
+                // out of quota. What is learned here decides who plans and who works.
+                crate::router::check_models(&settings, 8, 3 * 3600);
+            });
         }
         // For screenshots and tests: open the New project screen at start.
         if std::env::var_os("GAGENT_OPEN_PROJECT").is_some() {
@@ -415,6 +423,35 @@ impl GagentApp {
         let history = active.session.history.clone();
         self.save_session(&id);
         worker::run_turn(self.notify.clone(), id, engine, history, text, cancel);
+    }
+
+    /// Asks the models of the settings which ones work (in the background).
+    pub(crate) fn start_models_check(&mut self, settings: crate::config::Settings) {
+        if self.checking_models {
+            return;
+        }
+        self.checking_models = true;
+        self.key_status = None;
+        let notify = self.notify.clone();
+        std::thread::spawn(move || {
+            crate::router::refresh_live_models(&settings);
+            let found = crate::router::check_models_for(&settings, 30, 0, 70);
+            let (ok, text) = if found.asked == 0 {
+                (
+                    false,
+                    "Nothing to ask: add a key for a service first (and keep some models ticked).".to_string(),
+                )
+            } else {
+                (
+                    found.works > 0,
+                    format!(
+                        "Asked {} models: {} answered, {} did not (see the dots below).",
+                        found.asked, found.works, found.trouble
+                    ),
+                )
+            };
+            notify.send(Msg::ModelsChecked { ok, text });
+        });
     }
 
     /// The microphone button: starts recording, or stops it and writes down what was said.
@@ -808,6 +845,15 @@ impl GagentApp {
                     self.speak_last_answer(&session);
                 }
             }
+            Msg::TeamChosen {
+                session,
+                goal,
+                agents,
+            } => self.team_chosen(&session, goal, agents),
+            Msg::ModelsChecked { ok, text } => {
+                self.checking_models = false;
+                self.key_status = Some((ok, text));
+            }
             Msg::Transcribed { session, result } => {
                 self.voice_status = None;
                 match result {
@@ -1110,6 +1156,7 @@ impl GagentApp {
             || self.docker_checking
             || self.building_image
             || self.models_loading
+            || self.checking_models
             || self.recording.is_some()
             || self.voice_status.is_some()
             || self.playback.is_some()

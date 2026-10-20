@@ -130,20 +130,6 @@ pub fn sidebar(app: &mut GagentApp, ui: &mut egui::Ui) {
                 app.current = None;
                 app.project_draft = None;
             }
-            ui.add_space(4.0);
-            let by_hand = ui
-                .add(
-                    egui::Button::new(
-                        RichText::new("Choose the team by hand")
-                            .small()
-                            .color(theme::faint()),
-                    )
-                    .frame(false),
-                )
-                .on_hover_text("Usually not needed: describe a big job in a session and the lead plans it and picks the AIs. Here you pick every agent yourself.");
-            if by_hand.clicked() {
-                app.open_project_draft();
-            }
             ui.add_space(8.0);
 
             Panel::bottom("sidebar_footer")
@@ -288,45 +274,27 @@ fn running_delete_click(ui: &egui::Ui, rect: egui::Rect) -> bool {
 
 fn sidebar_footer(app: &mut GagentApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
-    let configured = app.settings.is_configured();
-    let ai = if configured {
-        format!(
-            "{} · {}",
-            app.settings.provider_label(),
-            short_model(app.settings.active_model())
-        )
+    // Nothing is shown while everything is fine; a problem gets one line.
+    let problem = if !crate::config::Provider::ALL.into_iter().any(|p| app.settings.provider_ready(p)) {
+        Some("No AI key yet: open Settings".to_string())
     } else {
-        format!("{}: not set up", app.settings.provider_label())
-    };
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(truncate_end(&ai, 36))
-                .small()
-                .color(if configured {
-                    theme::muted()
-                } else {
-                    theme::warn()
-                }),
-        );
-    });
-    let (sandbox, ok) = match &app.docker {
-        None => ("Sandbox: checking...".to_string(), true),
-        Some(s) if s.is_ready() => (format!("Sandbox: {}", s.short_label()), true),
-        Some(crate::sandbox::DockerStatus::NotInstalled) => {
-            ("Sandbox: Git, Docker or WSL not found".to_string(), false)
+        match &app.docker {
+            Some(crate::sandbox::DockerStatus::NotInstalled) => {
+                Some("Git, Docker or WSL not found: commands cannot run".to_string())
+            }
+            Some(s) if !s.is_ready() => Some("The sandbox is not running".to_string()),
+            _ => None,
         }
-        Some(_) => ("Sandbox: not running".to_string(), false),
     };
-    ui.horizontal(|ui| {
-        ui.add_space(8.0);
-        ui.label(RichText::new(sandbox).small().color(if ok {
-            theme::muted()
-        } else {
-            theme::warn()
-        }));
-    });
-    ui.add_space(8.0);
+    if let Some(text) = problem {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.add(
+                egui::Label::new(RichText::new(text).small().color(theme::warn())).wrap(),
+            );
+        });
+        ui.add_space(4.0);
+    }
     let settings = ui.add(
         egui::Button::new(RichText::new("Settings"))
             .fill(Color32::TRANSPARENT)
@@ -336,11 +304,6 @@ fn sidebar_footer(app: &mut GagentApp, ui: &mut egui::Ui) {
     if settings.clicked() {
         app.draft = Some(app.settings.clone());
     }
-}
-
-/// `nvidia/nemotron-3-ultra-550b-a55b` -> `nemotron-3-ultra-550b-a55b`.
-fn short_model(model: &str) -> &str {
-    model.rsplit('/').next().unwrap_or(model)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +325,7 @@ pub fn welcome(app: &mut GagentApp, ui: &mut egui::Ui) {
                 );
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("Pick a project folder. Gagent edits a private copy and changes your\nfiles only when you apply the result.")
+                    RichText::new("Pick a project folder. Gagent works on a private copy of it and puts the\nresult into your folder when a task is done. Every apply can be undone.")
                         .color(theme::muted()),
                 );
                 ui.add_space(26.0);
@@ -881,7 +844,12 @@ fn user_message(ui: &mut egui::Ui, text: &str) {
             .inner_margin(Margin::symmetric(16, 11))
             .show(ui, |ui| {
                 ui.set_max_width((ui.available_width() * 0.85).max(240.0));
-                ui.add(egui::Label::new(RichText::new(text).color(theme::text_strong())).wrap());
+                // The bubble sits at the right, the text starts at the left of it.
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(text).color(theme::text_strong())).wrap(),
+                    );
+                });
             });
     });
 }
@@ -1046,11 +1014,7 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                     .any(|i| matches!(i, ChatItem::Assistant(_)))
         });
     let mut hide_star = false;
-    let mut new_model: Option<String> = None;
-    let mut toggle_auto = false;
-    let mut new_provider: Option<crate::config::Provider> = None;
     let mut new_permission: Option<crate::config::PermissionMode> = None;
-    let mut new_team_mode: Option<crate::config::TeamMode> = None;
     let mut toggle_mic = false;
     let mut stop_voice = false;
 
@@ -1190,80 +1154,14 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                             {
                                 stop_voice = true;
                             }
-                            let auto = app.settings.auto_pick;
-                            if ui
-                                .selectable_label(auto, "Auto")
-                                .on_hover_text("Choose the best available model by itself for every message: it looks at what each model can do (code, images, size) and at the limits that are left, and moves on when one runs out of quota.")
-                                .clicked()
-                            {
-                                toggle_auto = true;
-                            }
-                            ui.add_enabled_ui(!auto, |ui| {
-                            let current = app.settings.active_model().to_string();
-                            let usable: Vec<crate::config::Provider> = crate::config::Provider::ALL
-                                .into_iter()
-                                .filter(|p| app.settings.provider_ready(*p))
-                                .collect();
-                            if usable.len() > 1 {
-                                egui::ComboBox::from_id_salt("provider_combo")
-                                    .selected_text(
-                                        RichText::new(app.settings.provider_label())
-                                            .small()
-                                            .color(theme::muted()),
-                                    )
-                                    .width(90.0)
-                                    .show_ui(ui, |ui| {
-                                        for p in &usable {
-                                            if ui
-                                                .selectable_label(*p == app.settings.provider, p.label())
-                                                .clicked()
-                                            {
-                                                new_provider = Some(*p);
-                                            }
-                                        }
-                                    });
-                            }
-                            let shown = format!(
-                                "{}{}",
-                                crate::models::label(&current),
-                                crate::modelstats::hint(&current)
-                            );
-                            egui::ComboBox::from_id_salt("model_combo")
-                                .selected_text(
-                                    RichText::new(truncate_end(&shown, 38))
-                                        .small()
-                                        .color(theme::muted()),
-                                )
-                                .width(260.0)
-                                .show_ui(ui, |ui| {
-                                    let show_all = app.show_all_models;
-                                    for m in crate::models::picker_list(&app.models, &current, show_all) {
-                                        if ui
-                                            .selectable_label(
-                                                m == current,
-                                                format!(
-                                                    "{}{}",
-                                                    crate::models::label(&m),
-                                                    crate::modelstats::hint(&m)
-                                                ),
-                                            )
-                                            .clicked()
-                                        {
-                                            new_model = Some(m);
-                                        }
-                                    }
-                                    ui.separator();
-                                    ui.checkbox(&mut app.show_all_models, "Show every model");
-                                });
-                            });
                             let permission = app.settings.permission;
                             egui::ComboBox::from_id_salt("permission_combo")
                                 .selected_text(
-                                    RichText::new(permission.short_label())
+                                    RichText::new(format!("Permission: {}", permission.short_label()))
                                         .small()
                                         .color(theme::muted()),
                                 )
-                                .width(110.0)
+                                .width(150.0)
                                 .show_ui(ui, |ui| {
                                     for mode in crate::config::PermissionMode::ALL {
                                         if ui
@@ -1277,28 +1175,6 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                                 .response
                                 .on_hover_text(
                                     "When the agent asks before it runs a command (installing packages, stopping programs, files outside the project). Dangerous commands are always refused.",
-                                );
-                            let team_mode = app.settings.team_mode;
-                            egui::ComboBox::from_id_salt("team_mode_combo")
-                                .selected_text(
-                                    RichText::new(team_mode.short_label())
-                                        .small()
-                                        .color(theme::muted()),
-                                )
-                                .width(100.0)
-                                .show_ui(ui, |ui| {
-                                    for mode in crate::config::TeamMode::ALL {
-                                        if ui
-                                            .selectable_label(mode == team_mode, mode.label())
-                                            .clicked()
-                                        {
-                                            new_team_mode = Some(mode);
-                                        }
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "A big job (an app, a site, a long list) is planned by a lead and done by several AIs. You can also start a message with /team or /solo.",
                                 );
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if running {
@@ -1398,34 +1274,6 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
     if let Some(f) = remove_attachment {
         if let Some(a) = app.open.get_mut(&id) {
             a.attachments.retain(|x| x != &f);
-        }
-    }
-    if let Some(m) = new_model {
-        if m != app.settings.active_model() {
-            app.settings.set_active_model(m);
-            app.save_settings();
-            for a in app.open.values_mut() {
-                a.engine_dirty = true;
-            }
-            app.refresh_engines_if_idle();
-        }
-    }
-    if toggle_auto {
-        let mut s = app.settings.clone();
-        s.auto_pick = !s.auto_pick;
-        app.commit_settings(s);
-    }
-    if let Some(p) = new_provider {
-        if p != app.settings.provider {
-            let mut s = app.settings.clone();
-            s.provider = p;
-            app.commit_settings(s);
-        }
-    }
-    if let Some(mode) = new_team_mode {
-        if mode != app.settings.team_mode {
-            app.settings.team_mode = mode;
-            app.save_settings();
         }
     }
     if let Some(mode) = new_permission {

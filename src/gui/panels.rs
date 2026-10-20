@@ -122,9 +122,11 @@ fn changes_tab(app: &mut GagentApp, ui: &mut egui::Ui) {
 
     heading_label(ui, "Pending changes");
     ui.label(
-        RichText::new(
-            "The agent works on a private copy. Nothing reaches your project until you apply it.",
-        )
+        RichText::new(if auto {
+            "The agent works on a private copy. When a task finishes its changes are applied to your project; every apply is saved, so you can undo it below."
+        } else {
+            "The agent works on a private copy. Nothing reaches your project until you apply it."
+        })
         .small()
         .color(theme::faint()),
     );
@@ -749,6 +751,7 @@ pub fn settings_window(app: &mut GagentApp, ctx: &egui::Context) {
     let mut save = false;
     let mut cancel = false;
     let mut test_key = false;
+    let mut check = false;
 
     egui::Window::new("Settings")
         .open(&mut open)
@@ -758,12 +761,15 @@ pub fn settings_window(app: &mut GagentApp, ctx: &egui::Context) {
         .default_height(620.0)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical()
+            let mut area = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .max_height(ui.available_height() - 48.0)
-                .show(ui, |ui| {
-                    settings_form(app, ui, &mut draft, &mut test_key);
-                });
+                .max_height(ui.available_height() - 48.0);
+            if let Some(y) = app.settings_scroll {
+                area = area.vertical_scroll_offset(y);
+            }
+            area.show(ui, |ui| {
+                settings_form(app, ui, &mut draft, &mut test_key, &mut check);
+            });
             ui.separator();
             ui.horizontal(|ui| {
                 if primary_button(ui, "Save").clicked() {
@@ -775,6 +781,9 @@ pub fn settings_window(app: &mut GagentApp, ctx: &egui::Context) {
             });
         });
 
+    if check {
+        app.start_models_check(draft.clone());
+    }
     if test_key {
         app.models_loading = true;
         app.key_status = None;
@@ -825,11 +834,241 @@ fn field(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     });
 }
 
+/// The dot and the words that say how a model is doing.
+fn state_look(state: crate::modelstats::State) -> (egui::Color32, String) {
+    use crate::modelstats::State;
+    match state {
+        State::Unknown => (theme::faint(), "not tested yet".to_string()),
+        State::Works(s) => (theme::ok(), format!("works, answers in {s:.1}s")),
+        State::Slow(s) => (theme::warn(), format!("works, but slow (~{s:.0}s)")),
+        State::Quota(left) => (
+            theme::warn(),
+            if left >= 3600 {
+                format!("out of quota for ~{}h", left / 3600)
+            } else {
+                format!("out of quota for ~{}min", (left / 60).max(1))
+            },
+        ),
+        State::Blocked => (
+            theme::err(),
+            "blocked in your account: allow it on the service's site".to_string(),
+        ),
+        State::Missing => (theme::err(), "this service does not have it".to_string()),
+    }
+}
+
+/// One service: its key (and address). The keys of all services sit together, so that nobody has
+/// to switch between them.
+fn service_card(
+    app: &mut GagentApp,
+    ui: &mut egui::Ui,
+    d: &mut crate::config::Settings,
+    provider: crate::config::Provider,
+) {
+    use crate::config::Provider;
+    let ready = d.provider_ready(provider);
+    Frame::new()
+        .fill(theme::bg())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::same(8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                status_dot(
+                    ui,
+                    if ready { theme::ok() } else { theme::faint() },
+                    "",
+                );
+                ui.label(
+                    RichText::new(provider.label())
+                        .strong()
+                        .color(theme::text_strong()),
+                );
+                ui.label(
+                    RichText::new(if ready { "key saved" } else { "no key" })
+                        .small()
+                        .color(theme::faint()),
+                );
+            });
+            ui.label(
+                RichText::new(provider.key_help())
+                    .small()
+                    .color(theme::faint()),
+            );
+            let (key, base_url, model): (&mut String, Option<&mut String>, Option<&mut String>) =
+                match provider {
+                    Provider::Gemini => (&mut d.api_key, None, None),
+                    Provider::Nvidia => (&mut d.nvidia.api_key, Some(&mut d.nvidia.base_url), None),
+                    Provider::Groq => (&mut d.groq.api_key, Some(&mut d.groq.base_url), None),
+                    Provider::Openai => (
+                        &mut d.openai.api_key,
+                        Some(&mut d.openai.base_url),
+                        Some(&mut d.openai.model),
+                    ),
+                };
+            field(ui, "API key", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(key)
+                        .password(!app.show_key)
+                        .hint_text(match provider {
+                            Provider::Gemini => "AIza...",
+                            Provider::Nvidia => "nvapi-...",
+                            Provider::Groq => "gsk_...",
+                            Provider::Openai => "(optional for a server on this computer)",
+                        })
+                        .desired_width(260.0),
+                );
+                ui.checkbox(&mut app.show_key, "Show");
+            });
+            if let Some(url) = base_url {
+                field(ui, "Server address", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(url)
+                            .hint_text(match provider {
+                                Provider::Nvidia => crate::openai::NVIDIA_BASE_URL,
+                                Provider::Groq => crate::openai::GROQ_BASE_URL,
+                                _ => "http://localhost:11434/v1",
+                            })
+                            .desired_width(300.0),
+                    );
+                });
+            }
+            if let Some(model) = model {
+                field(ui, "Model name", |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(model)
+                            .hint_text("e.g. deepseek-chat")
+                            .desired_width(300.0),
+                    );
+                });
+                ui.label(
+                    RichText::new("Any service that speaks the OpenAI API works here: OpenRouter, DeepSeek, Mistral, Together, a server on your own computer (Ollama, LM Studio)...")
+                        .small()
+                        .color(theme::faint()),
+                );
+            }
+        });
+    ui.add_space(4.0);
+}
+
+/// The keys of every service, and the button that finds out which models work.
+fn ai_services_section(
+    app: &mut GagentApp,
+    ui: &mut egui::Ui,
+    d: &mut crate::config::Settings,
+    check: &mut bool,
+) {
+    section(ui, "AI services", |ui| {
+        ui.label(
+            RichText::new("Paste a key for every service you have. Gagent then picks the best model that works, for every message and for every member of a team.")
+                .small()
+                .color(theme::faint()),
+        );
+        ui.add_space(4.0);
+        for provider in crate::config::Provider::ALL {
+            service_card(app, ui, d, provider);
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!app.checking_models, egui::Button::new("Check keys and models"))
+                .on_hover_text("Asks the best models a tiny question to see which ones answer now, which are blocked and which are out of quota.")
+                .clicked()
+            {
+                *check = true;
+            }
+            if app.checking_models {
+                theme::spinner(ui, 13.0);
+            }
+        });
+        if let Some((ok, text)) = &app.key_status {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(truncate_end(text, 240))
+                        .small()
+                        .color(if *ok { theme::ok() } else { theme::err() }),
+                )
+                .wrap(),
+            );
+        }
+    });
+}
+
+/// Every model Gagent may use, with what is known about it, and a tick to leave it out.
+fn models_section(ui: &mut egui::Ui, d: &mut crate::config::Settings) {
+    section(ui, "Models", |ui| {
+        ui.label(
+            RichText::new("Gagent picks the best of these for every message. Untick a model to leave it out. Green: works. Orange: slow or out of quota. Red: blocked or missing. Grey: not tested yet.")
+                .small()
+                .color(theme::faint()),
+        );
+        let mut any = false;
+        for provider in crate::config::Provider::ALL {
+            if !d.provider_ready(provider) {
+                continue;
+            }
+            any = true;
+            let host = crate::router::host_for(d, provider);
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(provider.label())
+                    .small()
+                    .strong()
+                    .color(theme::muted()),
+            );
+            let mut rows: Vec<(String, crate::modelstats::State)> =
+                crate::router::candidate_models(d, provider)
+                    .into_iter()
+                    .map(|m| {
+                        let state = crate::modelstats::state(&host, &m);
+                        (m, state)
+                    })
+                    // A model the service does not have is not worth showing.
+                    .filter(|(_, state)| *state != crate::modelstats::State::Missing)
+                    .collect();
+            // The ones that work come first, the fastest at the top.
+            let order = |s: crate::modelstats::State| -> f32 {
+                use crate::modelstats::State;
+                match s {
+                    State::Works(t) => t,
+                    State::Unknown => 100.0,
+                    State::Slow(t) => 200.0 + t,
+                    State::Quota(left) => 1000.0 + left as f32 / 3600.0,
+                    State::Blocked => 5000.0,
+                    State::Missing => 6000.0,
+                }
+            };
+            rows.sort_by(|a, b| order(a.1).total_cmp(&order(b.1)).then(a.0.cmp(&b.0)));
+            for (model, state) in rows {
+                let (color, text) = state_look(state);
+                ui.horizontal(|ui| {
+                    let mut on = d.model_enabled(provider, &model);
+                    if ui.checkbox(&mut on, "").changed() {
+                        d.set_model_enabled(provider, &model, on);
+                    }
+                    ui.label(
+                        RichText::new(truncate_end(&crate::models::label(&model), 44))
+                            .color(theme::text()),
+                    );
+                    status_dot(ui, color, &text);
+                });
+            }
+        }
+        if !any {
+            ui.label(
+                RichText::new("Add a key above to see the models.")
+                    .color(theme::faint()),
+            );
+        }
+    });
+}
+
 fn settings_form(
     app: &mut GagentApp,
     ui: &mut egui::Ui,
     d: &mut crate::config::Settings,
     test_key: &mut bool,
+    check: &mut bool,
 ) {
     section(ui, "Appearance", |ui| {
         field(ui, "Theme", |ui| {
@@ -844,7 +1083,15 @@ fn settings_form(
         });
     });
 
-    section(ui, "AI model", |ui| {
+    ai_services_section(app, ui, d, check);
+    models_section(ui, d);
+
+    section(ui, "How the model is chosen", |ui| {
+        ui.checkbox(
+            &mut d.auto_pick,
+            "Choose the best working model for every message by itself (recommended)",
+        );
+        if !d.auto_pick {
         let provider = d.provider;
         field(ui, "Service", |ui| {
             let mut chosen = provider;
@@ -994,6 +1241,7 @@ fn settings_form(
                     });
             });
         }
+        }
         field(ui, "Token budget per task", |ui| {
             ui.add(
                 egui::DragValue::new(&mut d.max_task_tokens)
@@ -1012,12 +1260,22 @@ fn settings_form(
             );
         });
         ui.checkbox(
-            &mut d.auto_pick,
-            "Choose the best model for every message automatically (Gemini, NVIDIA, Groq: what each does best, what is left of its limits)",
-        );
-        ui.checkbox(
             &mut d.auto_failover,
             "When a model runs out of quota or fails, go on with another one",
+        );
+        field(ui, "Big jobs", |ui| {
+            egui::ComboBox::from_id_salt("settings_team_mode")
+                .selected_text(d.team_mode.label())
+                .width(300.0)
+                .show_ui(ui, |ui| {
+                    for m in crate::config::TeamMode::ALL {
+                        ui.selectable_value(&mut d.team_mode, m, m.label());
+                    }
+                });
+        });
+        ui.checkbox(
+            &mut d.team_auto_start,
+            "Start the plan of a team without asking me (a team uses more tokens)",
         );
         field(ui, "Requests per minute", |ui| {
             ui.add(
@@ -1071,10 +1329,6 @@ fn settings_form(
         ui.checkbox(
             &mut d.share_secret_files,
             "Let the agent see secret files (.env, private keys)",
-        );
-        ui.checkbox(
-            &mut d.team_auto_start,
-            "Start the plan of a team without asking me (a team uses more tokens)",
         );
         ui.checkbox(
             &mut d.web_tools,
