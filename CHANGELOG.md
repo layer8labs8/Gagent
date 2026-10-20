@@ -2,15 +2,10 @@
 
 All notable changes to Gagent. The newest version is first.
 
-## Unreleased
+## 0.2.2
 
-- **Fixed:** a task that was moved from another service to Gemini in the middle (when the first model ran out of quota) stopped with
-  "Function call is missing a thought_signature". Gemini 3 models want a thought signature on every function call; calls made by
-  another model now carry the placeholder that Google documents for this case.
-- Installing or changing the Rust toolchain (`rustup default`, `update`, `toolchain install`, `target add`...) is asked about first
-  (it downloads 100 MB or more); before, only `cargo install` was.
-
-## 0.2.1
+Version 0.2.1 was withdrawn: a task that moved to another service in the middle could stop with an error (see *Fixed*). 0.2.2 is
+0.2.1 with the fixes below.
 
 ### New
 
@@ -70,6 +65,14 @@ All notable changes to Gagent. The newest version is first.
 - A settings file that starts with a byte order mark (saved by Notepad) is no longer treated as damaged.
 - The agent is told to write the user's language with its own letters (for Azerbaijani: ə ı ö ü ğ ş ç).
 - A small line after the first answer says a star on GitHub helps; one click hides it for good.
+
+### Fixed
+
+- A task that was moved from another service to Gemini in the middle (when the first model ran out of quota) stopped with "Function
+  call is missing a thought_signature". Gemini 3 models want a thought signature on every function call; calls made by another model
+  now carry the placeholder that Google documents for this case.
+- Installing or changing the Rust toolchain (`rustup default`, `update`, `toolchain install`, `target add`...) is asked about first
+  (it downloads 100 MB or more); before, only `cargo install` was.
 
 ## 0.2.0
 
