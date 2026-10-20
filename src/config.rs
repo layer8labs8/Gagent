@@ -496,6 +496,8 @@ pub struct Settings {
     pub voice_language: String,
     /// Save a git checkpoint of a git project before the agent's changes reach it.
     pub git_checkpoint: bool,
+    /// The agent may search the web and read pages (the user is asked first).
+    pub web_tools: bool,
 }
 
 impl Default for Settings {
@@ -536,6 +538,7 @@ impl Default for Settings {
             speak_answers: false,
             voice_language: String::new(),
             git_checkpoint: true,
+            web_tools: true,
         }
     }
 }

@@ -157,6 +157,27 @@ impl Approvals {
         }
     }
 
+    /// Asks before the agent reads the internet (a search, a page). Asked in the modes Ask and
+    /// Auto; "always" is remembered for the same `key` (a host, or the search).
+    pub fn authorize_web(
+        &self,
+        what: &str,
+        reason: &str,
+        key: &str,
+        cancel: &AtomicBool,
+    ) -> Result<(), String> {
+        if self.mode() == PermissionMode::All || lock(&self.inner).always.contains(key) {
+            return Ok(());
+        }
+        match self.ask(what, reason, key, cancel) {
+            Some(Decision::Allow | Decision::Always) => Ok(()),
+            Some(Decision::Deny) => Err(format!(
+                "the user did not allow this ({reason}). Do not look for a way around it. Carry on without it, or tell the user what you need and why."
+            )),
+            None => Err("cancelled".to_string()),
+        }
+    }
+
     /// Asks and waits. `None` when the task was cancelled while waiting.
     fn ask(&self, command: &str, reason: &str, key: &str, cancel: &AtomicBool) -> Option<Decision> {
         let request = {

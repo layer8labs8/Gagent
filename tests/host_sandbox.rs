@@ -222,6 +222,7 @@ fn ctx_for(r: &Rig) -> ToolContext {
         approvals: Arc::new(Approvals::new(PermissionMode::Auto)),
         reads: Default::default(),
         vision: false,
+        web: false,
     }
 }
 

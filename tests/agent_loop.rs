@@ -41,6 +41,7 @@ fn rig(results: Vec<ExecResult>) -> Rig {
         )),
         reads: Default::default(),
         vision: false,
+        web: false,
     };
     Rig {
         _dir: dir,
