@@ -262,3 +262,48 @@ fn another_agent_takes_over_a_task_that_failed() {
     assert_eq!(events.last().unwrap(), "end t1 done");
     assert_eq!(mock.received().len(), 3);
 }
+
+#[test]
+fn a_lead_that_cannot_plan_is_replaced_by_another_agent() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    // The first answer is "no such model": the lead's model is gone (or blocked, or out of quota).
+    let mock = MockGemini::start(vec![Canned::status(404, "model is gone"), text(PLAN)]);
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    fs::write(project.path().join("README.md"), "# demo\n").unwrap();
+    std::env::set_var("GAGENT_GEMINI_BASE_URL", &mock.base_url);
+    let mut settings = Settings::default();
+    settings.api_key = "TEAM-KEY".into();
+    settings.sandbox.backend = SandboxBackend::Host;
+    settings.permission = PermissionMode::All;
+    settings.auto_apply = false;
+    // Each agent asks its own model only, as when the user chose the models by hand.
+    settings.auto_pick = false;
+    settings.auto_failover = false;
+    let engine = Engine::open(
+        &AppDirs::at(home.path()),
+        &settings,
+        project.path(),
+        "plan-session",
+        Arc::new(|_| {}),
+    )
+    .unwrap();
+    let rig = Rig {
+        _home: home,
+        project,
+        engine,
+    };
+    let (outcome, events) = run(&rig, &team(), false, false);
+    assert!(outcome.declined, "the plan was shown and not approved");
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert_eq!(events[0], "planning lead1");
+    assert!(
+        events[1].starts_with("note lead1 could not make the plan") && events[1].ends_with("coder2 tries instead."),
+        "{}",
+        events[1]
+    );
+    assert_eq!(events[2], "planning coder2");
+    assert_eq!(events[3], "plan ready");
+    assert_eq!(outcome.plan.tasks.len(), 3);
+    assert_eq!(mock.received().len(), 2);
+}

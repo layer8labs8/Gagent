@@ -162,3 +162,42 @@ fn when_nothing_can_be_used_the_error_says_so_and_is_not_retried() {
     assert!(!err.is_retryable(), "{err}");
     assert!(err.user_message().to_lowercase().contains("out of quota"), "{err}");
 }
+
+#[test]
+fn checking_the_models_learns_which_ones_answer_and_does_not_ask_twice() {
+    let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let gemini = MockGemini::start(vec![text("OK"), text("OK"), text("OK")]);
+    std::env::set_var("GAGENT_GEMINI_BASE_URL", &gemini.base_url);
+    std::env::remove_var("GROQ_API_KEY");
+    std::env::remove_var("NVIDIA_API_KEY");
+    let mut s = Settings::default();
+    s.api_key = "GEMINI-KEY".into();
+    s.provider = Provider::Gemini;
+    // The model the user chose is one of the two the server lists.
+    s.model = "gemini-3.6-flash".into();
+    s.normalize();
+    modelstats::set_live_models(
+        &gagent::ratelimit::host_of(&gemini.base_url),
+        vec!["gemini-3.6-flash".to_string(), "gemini-3.5-flash".to_string()],
+    );
+
+    let first = gagent::router::check_models(&s, 5, 3600);
+    assert_eq!((first.asked, first.works, first.trouble), (2, 2, 0), "{first:?}");
+    let host = gagent::ratelimit::host_of(&gemini.base_url);
+    for m in ["gemini-3.6-flash", "gemini-3.5-flash"] {
+        assert!(modelstats::last_ok_age(&host, m).is_some(), "{m}");
+        assert!(matches!(modelstats::state(&host, m), modelstats::State::Works(_)), "{m}");
+    }
+    assert_eq!(gemini.received().len(), 2);
+
+    // They answered a moment ago: nothing is asked again.
+    let second = gagent::router::check_models(&s, 5, 3600);
+    assert_eq!(second.asked, 0);
+    assert_eq!(gemini.received().len(), 2);
+
+    // A model the user switched off is not asked, even when everything is asked again.
+    s.set_model_enabled(Provider::Gemini, "gemini-3.6-flash", false);
+    let third = gagent::router::check_models(&s, 5, 0);
+    assert_eq!((third.asked, third.works), (1, 1), "{third:?}");
+    assert_eq!(gemini.received().len(), 3);
+}

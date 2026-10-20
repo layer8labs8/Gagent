@@ -498,6 +498,8 @@ pub struct Settings {
     pub git_checkpoint: bool,
     /// The agent may search the web and read pages (the user is asked first).
     pub web_tools: bool,
+    /// Models the user switched off (`gemini:gemini-3.6-flash`): the automatic choice leaves them out.
+    pub disabled_models: Vec<String>,
 }
 
 impl Default for Settings {
@@ -539,6 +541,7 @@ impl Default for Settings {
             voice_language: String::new(),
             git_checkpoint: true,
             web_tools: true,
+            disabled_models: Vec::new(),
         }
     }
 }
@@ -563,6 +566,24 @@ impl Settings {
                 .trusted_folders
                 .iter()
                 .any(|t| Self::folder_key(t) == key)
+    }
+
+    fn model_key(provider: Provider, model: &str) -> String {
+        format!("{}:{}", provider.id(), model.trim().trim_start_matches("models/"))
+    }
+
+    /// False when the user switched this model off in the list of models.
+    pub fn model_enabled(&self, provider: Provider, model: &str) -> bool {
+        let key = Self::model_key(provider, model);
+        !self.disabled_models.iter().any(|d| *d == key)
+    }
+
+    pub fn set_model_enabled(&mut self, provider: Provider, model: &str, enabled: bool) {
+        let key = Self::model_key(provider, model);
+        self.disabled_models.retain(|d| *d != key);
+        if !enabled {
+            self.disabled_models.push(key);
+        }
     }
 
     /// Remembers that the user trusts this folder.
@@ -1062,6 +1083,20 @@ mod trusted_folder_tests {
         assert_eq!(s.last_project, "x");
         // Nothing was moved aside as damaged.
         assert!(dirs.settings_file().exists());
+    }
+
+    #[test]
+    fn a_model_can_be_switched_off_and_on() {
+        let mut s = Settings::default();
+        assert!(s.model_enabled(Provider::Groq, "openai/gpt-oss-20b"));
+        s.set_model_enabled(Provider::Groq, "openai/gpt-oss-20b", false);
+        s.set_model_enabled(Provider::Groq, "openai/gpt-oss-20b", false);
+        assert_eq!(s.disabled_models, vec!["groq:openai/gpt-oss-20b".to_string()]);
+        assert!(!s.model_enabled(Provider::Groq, "openai/gpt-oss-20b"));
+        // The same name at another service is another model.
+        assert!(s.model_enabled(Provider::Nvidia, "openai/gpt-oss-20b"));
+        s.set_model_enabled(Provider::Groq, "models/openai/gpt-oss-20b", true);
+        assert!(s.disabled_models.is_empty());
     }
 
     #[test]

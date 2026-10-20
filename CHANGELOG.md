@@ -4,6 +4,18 @@ All notable changes to Gagent. The newest version is first.
 
 ## Unreleased
 
+- **Gagent finds out which AIs work.** When it starts, and before every team, the best models are asked a tiny question: which answer,
+  which are blocked in your account, which are out of quota. The ones that answered lately are preferred, a slow model counts against
+  itself, and a model that fails is left out at once (up to ten are tried for one request). If the lead of a team cannot make the plan,
+  the other agents try in turn instead of stopping.
+- **One place for the services and models.** Settings → *AI services* has the keys of all services together (no switching), a button
+  *Check keys and models*, and *Models*: every model with a dot (works and how fast, slow, out of quota, blocked, not tested) and a tick
+  to leave one out. Models the service does not have are not shown.
+- **A simpler window.** The message box has only +, the microphone, the permission mode and send: the model is chosen by Gagent
+  (the service and model pickers, the second "Auto" and the team switch moved to Settings). The bottom of the sidebar is just
+  *Settings* (a line appears only when something is wrong). The text of your own message starts at the left of its bubble, not at the
+  right. The Changes panel says what is true about applying.
+
 - **Web search and reading pages.** The agent has two new tools, `web_search` (DuckDuckGo, no key needed) and `web_fetch` (a page or
   text file as plain text, in parts when it is long). The user is asked before every search and before every new host in the modes
   Ask and Auto ("Always allow" is remembered per host until Gagent is closed); the question shows the full address. Your own server

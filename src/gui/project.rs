@@ -1,6 +1,6 @@
 //! Team projects in the window: the New project screen, the plan board and the controls.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -212,16 +212,6 @@ impl GagentApp {
             }
             return false;
         }
-        let agents = if settings.auto_pick {
-            crate::router::suggest_team(&settings)
-        } else {
-            Vec::new()
-        };
-        let agents = if agents.is_empty() {
-            one_model_team(&settings)
-        } else {
-            agents
-        };
         let attachments = a.attachments.clone();
         let text = if attachments.is_empty() {
             goal.clone()
@@ -231,25 +221,72 @@ impl GagentApp {
                 attachments.join(", ")
             )
         };
-        let config = TeamConfig {
-            goal: text,
-            agents,
-        };
-        if let Err(e) = config.team() {
-            self.show_banner(e, true);
-            return false;
-        }
         let Some(a) = self.open.get_mut(id) else {
             return false;
         };
         a.session.set_title_from(&goal);
         a.session.items.push(ChatItem::User(goal));
-        a.session.meta.team = Some(config.clone());
-        a.team = Some(TeamUi::new(config));
         a.input.clear();
         a.attachments.clear();
-        self.start_team(id, false);
+        // Which AIs work right now is found out first (in the background): the plan must not
+        // be given to a model that is blocked or out of quota.
+        let cancel = Arc::new(AtomicBool::new(false));
+        a.run = Some(RunState {
+            cancel: cancel.clone(),
+            status: "Checking which AIs work...".into(),
+            started: Instant::now(),
+            usage: Default::default(),
+            last_event: Instant::now(),
+        });
+        a.log_info("Choosing the team");
+        a.scroll_to_bottom = true;
+        let notify = self.notify.clone();
+        let session = id.to_string();
+        std::thread::spawn(move || {
+            let agents = if settings.auto_pick {
+                if !cancel.load(Ordering::Relaxed) {
+                    crate::router::check_models(&settings, 6, 1800);
+                }
+                crate::router::suggest_team(&settings)
+            } else {
+                Vec::new()
+            };
+            notify.send(Msg::TeamChosen {
+                session,
+                goal: text,
+                agents,
+            });
+        });
         true
+    }
+
+    /// The AIs are chosen: the team starts with the plan.
+    pub(crate) fn team_chosen(&mut self, session: &str, goal: String, agents: Vec<AgentSpec>) {
+        let agents = if agents.is_empty() {
+            one_model_team(&self.settings)
+        } else {
+            agents
+        };
+        let config = TeamConfig { goal, agents };
+        let Some(a) = self.open.get_mut(session) else {
+            return;
+        };
+        let stopped = a
+            .run
+            .as_ref()
+            .is_some_and(|r| r.cancel.load(Ordering::Relaxed));
+        a.run = None;
+        if stopped {
+            a.session.items.push(ChatItem::Notice("Stopped.".into()));
+            return;
+        }
+        if let Err(e) = config.team() {
+            a.session.items.push(ChatItem::Error(e));
+            return;
+        }
+        a.session.meta.team = Some(config.clone());
+        a.team = Some(TeamUi::new(config));
+        self.start_team(session, false);
     }
 
     /// Plans (or continues) the project of session `id`.
@@ -618,7 +655,6 @@ pub fn bar(app: &mut GagentApp, ui: &mut egui::Ui) {
     };
     let ready = matches!(a.engine, EngineState::Ready(_));
     let phase = t.phase;
-    let status = a.run.as_ref().map(|r| (r.status.clone(), r.started.elapsed().as_secs()));
     let unfinished = t
         .plan
         .as_ref()
@@ -626,7 +662,11 @@ pub fn bar(app: &mut GagentApp, ui: &mut egui::Ui) {
         .unwrap_or(false);
     let has_plan = t.plan.is_some();
 
-    let (mut start, mut cancel_plan, mut stop, mut go_on) = (false, false, false, false);
+    // While the team plans or works the chat shows it (with the status and the stop button).
+    if matches!(phase, TeamPhase::Planning | TeamPhase::Running) {
+        return;
+    }
+    let (mut start, mut cancel_plan, mut go_on) = (false, false, false);
     ui.add_space(4.0);
     ui.horizontal(|ui| match phase {
         TeamPhase::Review => {
@@ -642,18 +682,7 @@ pub fn bar(app: &mut GagentApp, ui: &mut egui::Ui) {
                     .color(theme::faint()),
             );
         }
-        TeamPhase::Planning | TeamPhase::Running => {
-            theme::spinner(ui, 14.0);
-            if let Some((text, secs)) = &status {
-                ui.label(RichText::new(truncate_end(text, 80)).color(theme::muted()));
-                ui.label(RichText::new(format!("{secs}s")).small().color(theme::faint()));
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if plain_button(ui, "Stop").clicked() {
-                    stop = true;
-                }
-            });
-        }
+        TeamPhase::Planning | TeamPhase::Running => {}
         TeamPhase::Idle => {
             if has_plan && unfinished {
                 if ui
@@ -681,9 +710,6 @@ pub fn bar(app: &mut GagentApp, ui: &mut egui::Ui) {
     }
     if cancel_plan {
         app.team_decision(false);
-    }
-    if stop {
-        app.stop_run();
     }
     if go_on {
         app.start_team(&id, has_plan);

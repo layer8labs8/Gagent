@@ -36,6 +36,26 @@ pub struct Entry {
     pub used_today: u32,
     #[serde(default)]
     pub tokens_today: u64,
+    /// The last time (seconds since 1970) the model answered.
+    #[serde(default)]
+    pub last_ok: i64,
+}
+
+/// What is known about a model at a server right now.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum State {
+    /// Never asked (or nothing worked out of it yet).
+    Unknown,
+    /// It answers; the usual time in seconds.
+    Works(f32),
+    /// It answers, but slowly.
+    Slow(f32),
+    /// The quota is used up; seconds until it is back.
+    Quota(u64),
+    /// Blocked in the user's account (the service must be told to allow it).
+    Blocked,
+    /// The server does not have it.
+    Missing,
 }
 
 /// How often a model sent a tool call that could not be run (unknown tool, broken JSON,
@@ -84,6 +104,7 @@ impl Store {
         let entry = self.models.entry(key(host, model)).or_default();
         entry.missing = false;
         entry.blocked_until = 0;
+        entry.last_ok = now;
         entry.secs.push(secs);
         if entry.secs.len() > KEEP {
             entry.secs.remove(0);
@@ -116,6 +137,39 @@ impl Store {
 
     fn is_missing(&self, host: &str, model: &str) -> bool {
         self.models.get(&key(host, model)).is_some_and(|e| e.missing)
+    }
+
+    fn state(&self, host: &str, model: &str, now: i64) -> State {
+        let Some(e) = self.models.get(&key(host, model)) else {
+            return State::Unknown;
+        };
+        if e.missing {
+            return State::Missing;
+        }
+        if e.blocked_until > now {
+            return if e.block_reason.contains("blocked in your account") {
+                State::Blocked
+            } else {
+                State::Quota((e.blocked_until - now) as u64)
+            };
+        }
+        if e.secs.is_empty() {
+            return State::Unknown;
+        }
+        let mut secs = e.secs.clone();
+        secs.sort_by(|a, b| a.total_cmp(b));
+        let typical = secs[secs.len() / 2];
+        if typical >= SLOW_SECS {
+            State::Slow(typical)
+        } else {
+            State::Works(typical)
+        }
+    }
+
+    /// Seconds since the model last answered, when it ever did.
+    fn last_ok_age(&self, host: &str, model: &str, now: i64) -> Option<i64> {
+        let e = self.models.get(&key(host, model))?;
+        (e.last_ok > 0).then(|| (now - e.last_ok).max(0))
     }
 
     fn used_today(&self, host: &str, model: &str, now: i64) -> u32 {
@@ -296,6 +350,16 @@ pub fn is_missing(host: &str, model: &str) -> bool {
     lock().is_missing(host, model)
 }
 
+/// What is known about `model` at `host` (works, slow, out of quota, blocked, missing).
+pub fn state(host: &str, model: &str) -> State {
+    lock().state(host, model, now())
+}
+
+/// Seconds since the model last answered at `host`, when it ever did.
+pub fn last_ok_age(host: &str, model: &str) -> Option<i64> {
+    lock().last_ok_age(host, model, now())
+}
+
 /// Requests made to this model today (counted since the last UTC midnight).
 pub fn used_today(host: &str, model: &str) -> u32 {
     lock().used_today(host, model, now())
@@ -346,6 +410,25 @@ mod tests {
         }
         assert!(s.hint("m", NOW).starts_with("  slow ~"), "{}", s.hint("m", NOW));
         assert_eq!(s.models["h|m"].secs.len(), KEEP);
+    }
+
+    #[test]
+    fn the_state_of_a_model_says_if_it_works() {
+        let mut s = Store::default();
+        assert_eq!(s.state("h", "m", NOW), State::Unknown);
+        assert_eq!(s.last_ok_age("h", "m", NOW), None);
+        s.record_ok("h", "m", 1.5, 10, NOW);
+        assert_eq!(s.state("h", "m", NOW), State::Works(1.5));
+        assert_eq!(s.last_ok_age("h", "m", NOW + 120), Some(120));
+        s.record_limited("h", "m", 3600, "daily quota", NOW);
+        assert_eq!(s.state("h", "m", NOW + 60), State::Quota(3540));
+        assert_eq!(s.state("h", "m", NOW + 4000), State::Works(1.5), "the block passed");
+        s.record_limited("h", "locked", 600, "The model is blocked in your account's project", NOW);
+        assert_eq!(s.state("h", "locked", NOW + 1), State::Blocked);
+        s.record_missing("h", "gone");
+        assert_eq!(s.state("h", "gone", NOW), State::Missing);
+        s.record_ok("h", "slow", 70.0, 10, NOW);
+        assert_eq!(s.state("h", "slow", NOW), State::Slow(70.0));
     }
 
     #[test]

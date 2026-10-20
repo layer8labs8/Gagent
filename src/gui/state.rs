@@ -378,6 +378,14 @@ pub enum Msg {
     },
     /// An answer, spoken (a WAV file).
     Spoken(Result<Vec<u8>, String>),
+    /// The AIs for a team were chosen (after a quick check of which ones work).
+    TeamChosen {
+        session: String,
+        goal: String,
+        agents: Vec<AgentSpec>,
+    },
+    /// The check of the keys and models in the settings is done.
+    ModelsChecked { ok: bool, text: String },
     /// The files of an apply, and the git checkpoint saved before it.
     AppliedFiles {
         session: String,

@@ -105,8 +105,9 @@ Team:\n",
     s
 }
 
-/// Asks the lead for a plan; a plan that does not hold together is sent back (twice at most).
-/// `None` when the user stopped meanwhile.
+/// Asks the lead for a plan. When the lead cannot make one (its model is blocked or out of quota,
+/// or the plan is never usable), the other agents are asked in turn, so a model that does not
+/// work does not stop the project. `None` when the user stopped meanwhile.
 fn make_plan(
     engine: &Engine,
     goal: &str,
@@ -115,7 +116,43 @@ fn make_plan(
     emit: &dyn Fn(TeamEvent),
     cancel: &Arc<AtomicBool>,
 ) -> Result<Option<Plan>> {
-    let lead = team.lead();
+    let first = team.lead();
+    let mut order: Vec<&AgentSpec> = vec![first];
+    for a in &team.agents {
+        if !order.iter().any(|o| o.provider == a.provider && o.model == a.model) {
+            order.push(a);
+        }
+    }
+    let mut last = String::new();
+    for (n, lead) in order.iter().enumerate() {
+        match make_plan_with(engine, goal, team, lead, tokens, emit, cancel) {
+            Ok(plan) => return Ok(plan),
+            Err(e) => {
+                last = format!("{e:#}");
+                if let Some(next) = order.get(n + 1) {
+                    emit(TeamEvent::Note(format!(
+                        "{} could not make the plan ({}). {} tries instead.",
+                        lead.name,
+                        truncate_end(&last, 160),
+                        next.name
+                    )));
+                }
+            }
+        }
+    }
+    bail!("{last}")
+}
+
+/// Asks one agent for a plan; a plan that does not hold together is sent back (twice at most).
+fn make_plan_with(
+    engine: &Engine,
+    goal: &str,
+    team: &Team,
+    lead: &AgentSpec,
+    tokens: &mut u64,
+    emit: &dyn Fn(TeamEvent),
+    cancel: &Arc<AtomicBool>,
+) -> Result<Option<Plan>> {
     emit(TeamEvent::Planning {
         lead: lead.name.clone(),
         model: lead.model.clone(),

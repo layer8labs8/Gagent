@@ -11,7 +11,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::config::{Provider, Settings};
 use crate::gemini::{ApiError, ModelInfo, ModelReply};
@@ -118,10 +118,95 @@ fn host_of(settings: &Settings, provider: Provider) -> String {
     crate::ratelimit::host_of(&s.api_base_url())
 }
 
-/// `true` when the model's quota is not used up and the service knows the model.
+/// `true` when the user has not switched the model off, its quota is not used up and the service
+/// knows the model.
 fn available_now(settings: &Settings, provider: Provider, model: &str) -> bool {
     let host = host_of(settings, provider);
-    !modelstats::is_missing(&host, model) && modelstats::blocked_for(&host, model).is_none()
+    settings.model_enabled(provider, model)
+        && !modelstats::is_missing(&host, model)
+        && modelstats::blocked_for(&host, model).is_none()
+}
+
+/// The models of a service that the automatic choice may use (for the list in the settings).
+pub fn candidate_models(settings: &Settings, provider: Provider) -> Vec<String> {
+    models_of(settings, provider)
+}
+
+/// The host of a service (the key of what is remembered about its models).
+pub fn host_for(settings: &Settings, provider: Provider) -> String {
+    host_of(settings, provider)
+}
+
+/// What a check of the models found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CheckSummary {
+    /// Models that were asked.
+    pub asked: usize,
+    /// Models that answered.
+    pub works: usize,
+    /// Models that did not (blocked, out of quota, missing, a failing server).
+    pub trouble: usize,
+}
+
+/// Asks the best models a tiny question, all at once, to find out which ones answer now. A model
+/// that answered in the last `max_age_secs` seconds is not asked again. Waits at most 25 seconds;
+/// a slower model is noted when it answers. What each model did is remembered (see
+/// [`crate::modelstats`]), so the choice that follows leaves out the ones that do not work.
+pub fn check_models(settings: &Settings, limit: usize, max_age_secs: i64) -> CheckSummary {
+    check_models_for(settings, limit, max_age_secs, 25)
+}
+
+/// Like [`check_models`], waiting up to `wait_secs` seconds for the answers.
+pub fn check_models_for(
+    settings: &Settings,
+    limit: usize,
+    max_age_secs: i64,
+    wait_secs: u64,
+) -> CheckSummary {
+    let need = Need {
+        prompt_tokens: 300,
+        ..Need::default()
+    };
+    let mut todo: Vec<(Provider, String)> = Vec::new();
+    for c in rank(settings, &need, None) {
+        let host = host_of(settings, c.provider);
+        let fresh = modelstats::last_ok_age(&host, &c.model).is_some_and(|age| age < max_age_secs);
+        if !fresh {
+            todo.push((c.provider, c.model));
+        }
+        if todo.len() >= limit {
+            break;
+        }
+    }
+    let (tx, rx) = mpsc::channel::<bool>();
+    for (provider, model) in &todo {
+        let mut s = settings.clone();
+        s.provider = *provider;
+        s.set_active_model(model.clone());
+        let (tx, model) = (tx.clone(), model.clone());
+        std::thread::spawn(move || {
+            let client = crate::llm::make_direct(&s);
+            let question = [json!({"role": "user", "parts": [{"text": "Say OK."}]})];
+            let ok = client
+                .generate(&model, "Answer with the single word OK.", &question, &json!([]))
+                .is_ok();
+            let _ = tx.send(ok);
+        });
+    }
+    let mut summary = CheckSummary {
+        asked: todo.len(),
+        ..CheckSummary::default()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(wait_secs);
+    for _ in 0..todo.len() {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(true) => summary.works += 1,
+            Ok(false) => summary.trouble += 1,
+            Err(_) => break,
+        }
+    }
+    summary
 }
 
 fn score(
@@ -144,8 +229,13 @@ fn score(
         s += 0.7;
     }
     match modelstats::typical_secs(model) {
-        Some(secs) => s -= (secs / 20.0).min(4.0),
+        // Measured speed counts a lot: a slow model makes every step of a task slow.
+        Some(secs) => s -= (secs / 10.0).min(5.0),
         None => s += profiles::speed_prior(provider, model),
+    }
+    // A model that answered a short while ago is known to work; the others may be blocked.
+    if modelstats::last_ok_age(&host, model).is_some_and(|age| age < 6 * 3600) {
+        s += 1.0;
     }
     // A model that has already done a lot today has less left than one that has not.
     s -= (modelstats::used_today(&host, model) as f32 / 150.0).min(2.0);
@@ -259,6 +349,10 @@ pub fn suggest_team_with(settings: &Settings, usable: Usable) -> Vec<AgentSpec> 
 // ---------------------------------------------------------------------------
 // The client that chooses
 // ---------------------------------------------------------------------------
+
+/// Models asked one after the other for one request. A model that is blocked or out of quota
+/// answers at once, so the list may be long.
+const MAX_TRIES: usize = 10;
 
 /// How [`AutoClient`] chooses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,7 +493,7 @@ impl ModelClient for AutoClient {
         loop {
             if pending == 0 {
                 match next_free(&started, &skipped, None) {
-                    Some(i) if launched < 5 => {
+                    Some(i) if launched < MAX_TRIES => {
                         launch(i);
                         started[i] = true;
                         launched += 1;
@@ -408,7 +502,8 @@ impl ModelClient for AutoClient {
                     _ => break,
                 }
             }
-            let may_hedge = !hedged && launched < 5 && next_free(&started, &skipped, None).is_some();
+            let may_hedge =
+                !hedged && launched < MAX_TRIES && next_free(&started, &skipped, None).is_some();
             let wait = if may_hedge {
                 self.hedge_after
             } else {
