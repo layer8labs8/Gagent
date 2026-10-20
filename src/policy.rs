@@ -130,6 +130,13 @@ fn questions() -> &'static [Rule] {
             ),
             (
                 format!(
+                    r"(?i){AT_COMMAND}{FOLDER}rustup(\.exe)?\s+(default|install|update|set|self|toolchain\s+(install|add|uninstall|remove)|component\s+(add|remove)|target\s+(add|remove))\b"
+                ),
+                "install:rustup",
+                "installs or changes the Rust toolchain (a download of 100 MB or more)",
+            ),
+            (
+                format!(
                     r"(?i){AT_COMMAND}{FOLDER}(winget|choco|scoop|brew)(\.exe|\.cmd)?\s+(install|upgrade|uninstall)\b"
                 ),
                 "install:system",
@@ -328,6 +335,23 @@ mod tests {
         match assess(command, &win()) {
             Verdict::Ask { reason, key } => Some((reason, key)),
             _ => None,
+        }
+    }
+
+    #[test]
+    fn installing_a_rust_toolchain_is_asked_about() {
+        for command in [
+            "rustup default stable",
+            "cd app && rustup update",
+            "rustup toolchain install nightly",
+            "rustup target add wasm32-unknown-unknown",
+            "rustup.exe component add clippy",
+        ] {
+            let (_, key) = asked(command).unwrap_or_else(|| panic!("not asked: {command}"));
+            assert_eq!(key, "install:rustup", "{command}");
+        }
+        for command in ["rustup show", "rustup which cargo", "cargo build --release", "cargo test"] {
+            assert_eq!(assess(command, &win()), Verdict::Allow, "{command}");
         }
     }
 

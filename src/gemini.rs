@@ -251,7 +251,7 @@ impl GeminiClient {
         let url = format!("{}/models/{}:generateContent", self.base_url, model);
         let mut body = json!({
             "systemInstruction": { "parts": [ { "text": system } ] },
-            "contents": contents,
+            "contents": with_signatures(contents),
         });
         if tool_declarations
             .as_array()
@@ -311,6 +311,31 @@ impl GeminiClient {
         }
         Ok(sort_models(models))
     }
+}
+
+/// What Google documents for function calls that another model made: Gemini 3 models refuse a
+/// function call without a thought signature, and a task that started on another service (the
+/// automatic choice moved from NVIDIA to Gemini in the middle of it) has calls without one.
+const PLACEHOLDER_SIGNATURE: &str = "skip_thought_signature_validator";
+
+/// The conversation with a placeholder signature on every function call of the model that has none.
+pub(crate) fn with_signatures(contents: &[Value]) -> Vec<Value> {
+    contents
+        .iter()
+        .map(|message| {
+            let mut message = message.clone();
+            if message["role"] == "model" {
+                if let Some(parts) = message["parts"].as_array_mut() {
+                    for part in parts {
+                        if part.get("functionCall").is_some() && part.get("thoughtSignature").is_none() {
+                            part["thoughtSignature"] = json!(PLACEHOLDER_SIGNATURE);
+                        }
+                    }
+                }
+            }
+            message
+        })
+        .collect()
 }
 
 /// Remembers what an error says about the model: a used-up quota, or "not found".
@@ -550,6 +575,27 @@ mod tests {
         assert!(!e.is_retryable());
         assert!(e.user_message().contains("Settings"));
         assert!(ApiError::Transport("x".into()).is_retryable());
+    }
+
+    #[test]
+    fn calls_of_another_model_get_a_placeholder_signature_and_real_ones_stay() {
+        let history = vec![
+            json!({"role":"user","parts":[{"text":"go"}]}),
+            json!({"role":"model","parts":[
+                {"functionCall":{"name":"run_command","args":{"command":"ls"}}},
+                {"functionCall":{"name":"list_files","args":{}},"thoughtSignature":"REAL"},
+                {"text":"thinking"}
+            ]}),
+            json!({"role":"user","parts":[{"functionResponse":{"name":"run_command","response":{"output":"x"}}}]}),
+        ];
+        let sent = with_signatures(&history);
+        assert_eq!(sent[1]["parts"][0]["thoughtSignature"], "skip_thought_signature_validator");
+        assert_eq!(sent[1]["parts"][1]["thoughtSignature"], "REAL");
+        assert!(sent[1]["parts"][2].get("thoughtSignature").is_none());
+        // The user's messages are not touched, and the stored history is not changed.
+        assert_eq!(sent[0], history[0]);
+        assert_eq!(sent[2], history[2]);
+        assert!(history[1]["parts"][0].get("thoughtSignature").is_none());
     }
 
     #[test]
