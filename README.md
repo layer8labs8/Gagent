@@ -246,8 +246,9 @@ tests/             mock model servers and real sandbox tests
 
 ## What is new
 
-See [CHANGELOG.md](CHANGELOG.md): version 0.2.0 brings team projects, Groq, the automatic choice of the model, screenshots and
-picture reading, and the model menu with reply times.
+See [CHANGELOG.md](CHANGELOG.md): version 0.2.1 puts small and big jobs in one window (a lead plans, the AIs that work are chosen
+for you), adds voice, web search, git checkpoints and commits, a check of which models work, and a question before an unknown folder
+is opened. Version 0.2.0 brought team projects, Groq, the automatic choice of the model and screenshots.
 
 ## Roadmap
 
