@@ -863,6 +863,11 @@ impl GagentApp {
                     run.usage = u;
                 }
             }
+            AgentEvent::Spent { company, tokens } => {
+                if !company.is_empty() {
+                    *a.session.meta.spent.entry(company).or_insert(0) += tokens;
+                }
+            }
             AgentEvent::Notice(text) => {
                 a.log_info(&text);
                 a.session.items.push(ChatItem::Notice(text));

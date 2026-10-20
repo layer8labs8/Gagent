@@ -56,6 +56,8 @@ pub enum AgentEvent {
     FilesChanged,
     /// Total token usage of the current turn so far.
     Usage(Usage),
+    /// Tokens one request used, and the company that answered it.
+    Spent { company: String, tokens: u64 },
     /// Something the user should know: another model took over because one ran out of quota.
     Notice(String),
 }
@@ -109,7 +111,11 @@ pub fn run_turn(
     emit: &dyn Fn(AgentEvent),
     cancel: &AtomicBool,
 ) -> TurnResult {
-    history.push(json!({ "role": "user", "parts": [ { "text": user_text } ] }));
+    let mut first_parts = vec![json!({ "text": user_text })];
+    if ctx.vision {
+        first_parts.extend(attached_pictures(user_text, ctx));
+    }
+    history.push(json!({ "role": "user", "parts": first_parts }));
 
     let declarations = tools::declarations_for(ctx.vision);
     let mut usage = Usage::default();
@@ -154,6 +160,12 @@ pub fn run_turn(
         };
         usage.add(reply.usage);
         emit(AgentEvent::Usage(usage));
+        if reply.usage.total_tokens > 0 {
+            emit(AgentEvent::Spent {
+                company: client.company(),
+                tokens: reply.usage.total_tokens,
+            });
+        }
 
         let empty = !reply.has_parts() || (reply.text.trim().is_empty() && reply.calls.is_empty());
         if empty {
@@ -271,6 +283,42 @@ pub fn run_turn(
         response_parts.append(&mut image_parts);
         history.push(json!({ "role": "user", "parts": response_parts }));
     }
+}
+
+/// Header the window puts in front of a message that has files attached.
+const ATTACHED_HEADER: &str = "[Attached files in the workspace: ";
+/// Pictures sent along with one message.
+const MAX_ATTACHED_PICTURES: usize = 4;
+
+/// The pictures among the files attached to a message, as parts of the message, so that a model
+/// that can see looks at them at once (and the automatic choice picks one that can).
+fn attached_pictures(user_text: &str, ctx: &ToolContext) -> Vec<Value> {
+    let Some(rest) = user_text.strip_prefix(ATTACHED_HEADER) else {
+        return Vec::new();
+    };
+    let Some((list, _)) = rest.split_once(']') else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for rel in list.split(", ").map(str::trim) {
+        let lower = rel.to_ascii_lowercase();
+        if !["png", "jpg", "jpeg", "gif", "webp"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")))
+        {
+            continue;
+        }
+        let Ok(path) = ctx.work.resolve(rel) else {
+            continue;
+        };
+        if let Ok(image) = crate::vision::load(&path) {
+            parts.push(image.part());
+        }
+        if parts.len() >= MAX_ATTACHED_PICTURES {
+            break;
+        }
+    }
+    parts
 }
 
 fn function_response(call: &FunctionCall, ok: bool, text: &str) -> Value {

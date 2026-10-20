@@ -294,7 +294,10 @@ fn team_project(
             eprintln!("\n== {id}  {}  [{owner}]", truncate_end(&title, 80))
         }
         TeamEvent::Agent { event, .. } => match event {
-            AgentEvent::Status(_) | AgentEvent::Usage(_) | AgentEvent::FilesChanged => {}
+            AgentEvent::Status(_)
+            | AgentEvent::Usage(_)
+            | AgentEvent::Spent { .. }
+            | AgentEvent::FilesChanged => {}
             AgentEvent::Notice(text) => eprintln!("   note: {text}"),
             AgentEvent::Text(_) => {}
             AgentEvent::ToolStart { summary, .. } => eprintln!("   >> {summary}"),
@@ -483,7 +486,10 @@ fn run_task(
     );
 
     let emit = |event: AgentEvent| match event {
-        AgentEvent::Status(_) | AgentEvent::Usage(_) | AgentEvent::FilesChanged => {}
+        AgentEvent::Status(_)
+            | AgentEvent::Usage(_)
+            | AgentEvent::Spent { .. }
+            | AgentEvent::FilesChanged => {}
         AgentEvent::Notice(text) => eprintln!("note: {text}"),
         AgentEvent::Text(t) => println!("\n{t}\n"),
         AgentEvent::ToolStart { summary, .. } => eprintln!(">> {summary}"),

@@ -38,6 +38,8 @@ fn settings(gemini: &MockGemini, nvidia: &MockGemini) -> Settings {
     std::env::set_var("GAGENT_GEMINI_BASE_URL", &gemini.base_url);
     std::env::set_var("GAGENT_NVIDIA_BASE_URL", v1(nvidia));
     let mut s = Settings::default();
+    // These tests are about going on with another model when the chosen one fails.
+    s.auto_pick = false;
     s.provider = Provider::Gemini;
     s.api_key = "GEMINI-KEY".into();
     s.model = "gemini-2.5-pro".into();

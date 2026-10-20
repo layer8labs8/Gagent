@@ -39,16 +39,13 @@ pub const NVIDIA_PRESET_MODELS: &[&str] = &[
 pub const NVIDIA_AUTO_REQUESTS_PER_MINUTE: u32 = 35;
 
 /// Default Groq model.
-pub const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
+pub const DEFAULT_GROQ_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Groq models offered before the live list has been fetched.
 pub const GROQ_PRESET_MODELS: &[&str] = &[
-    "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
-    "llama-3.1-8b-instant",
-    "qwen/qwen3-32b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3.8-27b",
 ];
 
 /// Requests per minute that Gagent keeps to by itself on Groq's free plan (it allows about 30).
@@ -452,6 +449,8 @@ pub struct Settings {
     pub last_project: String,
     /// Folders the user said "I trust this folder" for. The agent does not work in any other.
     pub trusted_folders: Vec<String>,
+    /// The small "a star on GitHub helps" line under the message box was hidden by the user.
+    pub star_hint_hidden: bool,
 }
 
 impl Default for Settings {
@@ -476,7 +475,7 @@ impl Default for Settings {
             max_steps: 40,
             max_task_tokens: 1_500_000,
             requests_per_minute: 0,
-            auto_pick: false,
+            auto_pick: true,
             auto_failover: true,
             auto_check: CheckLevel::Light,
             permission: PermissionMode::Auto,
@@ -486,6 +485,7 @@ impl Default for Settings {
             appearance: Appearance::Auto,
             last_project: String::new(),
             trusted_folders: Vec::new(),
+            star_hint_hidden: false,
         }
     }
 }
@@ -930,7 +930,8 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"provider":"nvidia"}"#).unwrap();
         assert_eq!(old.groq.model, DEFAULT_GROQ_MODEL);
         assert_eq!(old.groq.base_url, crate::openai::GROQ_BASE_URL);
-        assert!(old.auto_failover && !old.auto_pick);
+        // Automatic choice of the model is the default.
+        assert!(old.auto_failover && old.auto_pick);
     }
 
     #[test]

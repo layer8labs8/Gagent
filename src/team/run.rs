@@ -149,6 +149,12 @@ fn make_plan(
             Err(CallError::Api(e)) => bail!("the lead could not make a plan: {}", e.user_message()),
         };
         *tokens += reply.usage.total_tokens;
+        if reply.usage.total_tokens > 0 {
+            status(AgentEvent::Spent {
+                company: client.company(),
+                tokens: reply.usage.total_tokens,
+            });
+        }
         let checked = Plan::parse(&reply.text).and_then(|mut p| {
             p.goal = goal.to_string();
             p.validate(&team.agents).map(|_| p)

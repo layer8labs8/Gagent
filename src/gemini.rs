@@ -55,6 +55,11 @@ impl ApiError {
         let lower = message.to_ascii_lowercase();
         match *status {
             402 => Some(24 * 3600),
+            // "The model is blocked at the project level": only this model, until the user
+            // enables it in the console. Looked at again after a few minutes.
+            403 if lower.contains("blocked at the project level") || lower.contains("model_permission_blocked") => {
+                Some(600)
+            }
             429 => {
                 let long = retry_after
                     .filter(|s| *s > 120)
@@ -104,6 +109,9 @@ impl ApiError {
                     }
                     400 => format!("The request was rejected: {message}"),
                     401 => "The API key was rejected. Open Settings and check the key.".to_string(),
+                    403 if lower.contains("blocked at the project level") => format!(
+                        "The model is blocked in your account's project: enable it in the service's console (for Groq: console.groq.com/settings/project/limits). ({message})"
+                    ),
                     403 => format!(
                         "Access denied. The key may be restricted, or the model is not enabled for it. ({message})"
                     ),
@@ -567,6 +575,15 @@ mod tests {
             Some(24 * 3600)
         );
         assert_eq!(http(402, "payment required", None).quota_block_secs(), Some(24 * 3600));
+        // A model blocked in the project settings: only that model, for a few minutes.
+        let blocked = http(
+            403,
+            "The model `openai/gpt-oss-20b` is blocked at the project level. Please have a project admin enable this model",
+            None,
+        );
+        assert_eq!(blocked.quota_block_secs(), Some(600));
+        assert!(blocked.user_message().contains("console.groq.com/settings/project/limits"));
+        assert_eq!(http(403, "invalid key", None).quota_block_secs(), None);
         assert_eq!(http(500, "oops", None).quota_block_secs(), None);
         assert!(http(429, "x", None).should_try_another());
         assert!(http(404, "x", None).should_try_another());

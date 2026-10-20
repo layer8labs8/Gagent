@@ -133,7 +133,8 @@ a file again if you need its contents, and never write such a placeholder into a
 8. Be economical, every step is paid for: search before reading, read only the line ranges you need, \
 call several independent tools in one step, and do not read a file again right after you wrote it.\n\
 9. Finish with a short summary: what you changed, how you verified it, and anything that is left. \
-Reply in the language the user writes in.\n",
+Reply in the language the user writes in, with that language's own letters and spelling \
+(for Azerbaijani: ə ı ö ü ğ ş ç, never look-alikes in plain ASCII).\n",
     );
 
     p.push_str(&project_notes(info.workspace));
