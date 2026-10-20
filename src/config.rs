@@ -24,12 +24,35 @@ pub const DEFAULT_NVIDIA_MODEL: &str = "nvidia/nemotron-3.5-super-vl-120b-a12b";
 /// NVIDIA models offered before the live model list has been fetched.
 pub const NVIDIA_PRESET_MODELS: &[&str] = &[
     "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    "nvidia/nemotron-3-super-120b-a12b",
     "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "deepseek-ai/deepseek-v4.1-flash",
-    "moonshotai/kimi-k2.6",
     "openai/gpt-oss-20b",
+    "poolside/laguna-xs-2.1",
+    "stepfun-ai/step-5-preview",
+    "meta/muse-glimmer-30b",
+    "nvidia/nemotron-3-ultra-550b-a55b",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "meta/llama-3.2-90b-vision-instruct",
 ];
+
+/// Requests per minute that Gagent keeps to by itself on NVIDIA's free endpoint, a little
+/// below the 40 it allows.
+pub const NVIDIA_AUTO_REQUESTS_PER_MINUTE: u32 = 35;
+
+/// Default Groq model.
+pub const DEFAULT_GROQ_MODEL: &str = "llama-3.3-70b-versatile";
+
+/// Groq models offered before the live list has been fetched.
+pub const GROQ_PRESET_MODELS: &[&str] = &[
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+    "qwen/qwen3-32b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+];
+
+/// Requests per minute that Gagent keeps to by itself on Groq's free plan (it allows about 30).
+pub const GROQ_AUTO_REQUESTS_PER_MINUTE: u32 = 25;
 
 /// Default sandbox image tag built from the bundled Dockerfile.
 pub const DEFAULT_SANDBOX_IMAGE: &str = "gagent-sandbox:latest";
@@ -43,18 +66,26 @@ pub enum Provider {
     Gemini,
     /// NVIDIA's hosted models (build.nvidia.com).
     Nvidia,
+    /// Groq's very fast hosted models (console.groq.com).
+    Groq,
     /// Any OpenAI-compatible server: OpenAI, OpenRouter, Ollama, LM Studio, vLLM, ...
     Openai,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Gemini, Provider::Nvidia, Provider::Openai];
+    pub const ALL: [Provider; 4] = [
+        Provider::Gemini,
+        Provider::Nvidia,
+        Provider::Groq,
+        Provider::Openai,
+    ];
 
     /// Name shown in the UI.
     pub fn label(self) -> &'static str {
         match self {
             Provider::Gemini => "Google Gemini",
             Provider::Nvidia => "NVIDIA",
+            Provider::Groq => "Groq",
             Provider::Openai => "OpenAI-compatible",
         }
     }
@@ -64,6 +95,7 @@ impl Provider {
         match self {
             Provider::Gemini => "gemini",
             Provider::Nvidia => "nvidia",
+            Provider::Groq => "groq",
             Provider::Openai => "openai",
         }
     }
@@ -72,6 +104,7 @@ impl Provider {
         match name.trim().to_ascii_lowercase().as_str() {
             "gemini" | "google" => Some(Provider::Gemini),
             "nvidia" | "nim" => Some(Provider::Nvidia),
+            "groq" => Some(Provider::Groq),
             "openai" | "custom" | "ollama" | "openrouter" => Some(Provider::Openai),
             _ => None,
         }
@@ -82,6 +115,7 @@ impl Provider {
         match self {
             Provider::Gemini => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
             Provider::Nvidia => &["NVIDIA_API_KEY", "NGC_API_KEY"],
+            Provider::Groq => &["GROQ_API_KEY"],
             Provider::Openai => &["OPENAI_API_KEY"],
         }
     }
@@ -91,6 +125,7 @@ impl Provider {
         match self {
             Provider::Gemini => "get a free key at https://aistudio.google.com/apikey",
             Provider::Nvidia => "create a key at https://build.nvidia.com (it starts with nvapi-)",
+            Provider::Groq => "create a key at https://console.groq.com/keys (it starts with gsk_)",
             Provider::Openai => "enter the server address (and key, if it needs one)",
         }
     }
@@ -382,6 +417,8 @@ pub struct Settings {
     pub model: String,
     /// NVIDIA hosted models (`NVIDIA_API_KEY` is used when the key is empty).
     pub nvidia: ProviderConfig,
+    /// Groq's hosted models (`GROQ_API_KEY` is used when the key is empty).
+    pub groq: ProviderConfig,
     /// Any other OpenAI-compatible server.
     pub openai: ProviderConfig,
     /// Longest answer (including reasoning) requested from OpenAI-compatible providers.
@@ -392,6 +429,14 @@ pub struct Settings {
     pub max_steps: u32,
     /// Stop a task after this many tokens (all of its requests added up). 0 = no limit.
     pub max_task_tokens: u64,
+    /// Choose the best available model for every message by itself (Gemini, NVIDIA, Groq...),
+    /// looking at what each can do and at the limits that are left.
+    pub auto_pick: bool,
+    /// When a model runs out of quota or fails, go on with another one instead of stopping.
+    pub auto_failover: bool,
+    /// Requests per minute to the AI service. 0 = automatic (35 on NVIDIA's free endpoint,
+    /// no limit on the others).
+    pub requests_per_minute: u32,
     /// Quick checks of files the agent writes.
     pub auto_check: CheckLevel,
     /// When the agent asks before running a command.
@@ -418,11 +463,19 @@ impl Default for Settings {
                 model: DEFAULT_NVIDIA_MODEL.to_string(),
                 base_url: crate::openai::NVIDIA_BASE_URL.to_string(),
             },
+            groq: ProviderConfig {
+                api_key: String::new(),
+                model: DEFAULT_GROQ_MODEL.to_string(),
+                base_url: crate::openai::GROQ_BASE_URL.to_string(),
+            },
             openai: ProviderConfig::default(),
             max_output_tokens: 16384,
             tool_mode: ToolMode::Auto,
             max_steps: 40,
             max_task_tokens: 1_500_000,
+            requests_per_minute: 0,
+            auto_pick: false,
+            auto_failover: true,
             auto_check: CheckLevel::Light,
             permission: PermissionMode::Auto,
             auto_apply: true,
@@ -488,6 +541,14 @@ impl Settings {
         if self.nvidia.base_url.is_empty() {
             self.nvidia.base_url = crate::openai::NVIDIA_BASE_URL.to_string();
         }
+        self.groq.model = self.groq.model.trim().to_string();
+        if self.groq.model.is_empty() {
+            self.groq.model = DEFAULT_GROQ_MODEL.to_string();
+        }
+        self.groq.base_url = self.groq.base_url.trim().trim_end_matches('/').to_string();
+        if self.groq.base_url.is_empty() {
+            self.groq.base_url = crate::openai::GROQ_BASE_URL.to_string();
+        }
         self.openai.model = self.openai.model.trim().to_string();
         self.openai.base_url = self
             .openai
@@ -498,6 +559,7 @@ impl Settings {
         self.sandbox.wsl_distro = self.sandbox.wsl_distro.trim().to_string();
         self.max_output_tokens = self.max_output_tokens.clamp(256, 131_072);
         self.max_steps = self.max_steps.clamp(1, 200);
+        self.requests_per_minute = self.requests_per_minute.min(600);
         if self.max_task_tokens != 0 {
             self.max_task_tokens = self.max_task_tokens.clamp(50_000, 100_000_000);
         }
@@ -515,8 +577,29 @@ impl Settings {
         match self.provider {
             Provider::Gemini => "Gemini",
             Provider::Nvidia => "NVIDIA",
+            Provider::Groq => "Groq",
             Provider::Openai => "AI server",
         }
+    }
+
+    /// Requests per minute to keep to for the provider in use; 0 means no limit.
+    pub fn rate_limit(&self) -> u32 {
+        if self.requests_per_minute > 0 {
+            self.requests_per_minute
+        } else if self.provider == Provider::Nvidia {
+            NVIDIA_AUTO_REQUESTS_PER_MINUTE
+        } else if self.provider == Provider::Groq {
+            GROQ_AUTO_REQUESTS_PER_MINUTE
+        } else {
+            0
+        }
+    }
+
+    /// True when `provider` has what it needs (a key, or an address and a model) to be used.
+    pub fn provider_ready(&self, provider: Provider) -> bool {
+        let mut s = self.clone();
+        s.provider = provider;
+        s.is_configured()
     }
 
     /// The model of the provider in use.
@@ -524,6 +607,7 @@ impl Settings {
         match self.provider {
             Provider::Gemini => &self.model,
             Provider::Nvidia => &self.nvidia.model,
+            Provider::Groq => &self.groq.model,
             Provider::Openai => &self.openai.model,
         }
     }
@@ -532,6 +616,7 @@ impl Settings {
         match self.provider {
             Provider::Gemini => self.model = model,
             Provider::Nvidia => self.nvidia.model = model,
+            Provider::Groq => self.groq.model = model,
             Provider::Openai => self.openai.model = model,
         }
     }
@@ -541,6 +626,7 @@ impl Settings {
         match self.provider {
             Provider::Gemini => PRESET_MODELS.iter().map(|s| s.to_string()).collect(),
             Provider::Nvidia => NVIDIA_PRESET_MODELS.iter().map(|s| s.to_string()).collect(),
+            Provider::Groq => GROQ_PRESET_MODELS.iter().map(|s| s.to_string()).collect(),
             Provider::Openai => Vec::new(),
         }
     }
@@ -550,6 +636,7 @@ impl Settings {
         let saved = match self.provider {
             Provider::Gemini => &self.api_key,
             Provider::Nvidia => &self.nvidia.api_key,
+            Provider::Groq => &self.groq.api_key,
             Provider::Openai => &self.openai.api_key,
         }
         .trim();
@@ -570,7 +657,9 @@ impl Settings {
     /// OpenAI-compatible servers (Ollama, LM Studio) work without a key.
     pub fn is_configured(&self) -> bool {
         match self.provider {
-            Provider::Gemini | Provider::Nvidia => !self.effective_api_key().is_empty(),
+            Provider::Gemini | Provider::Nvidia | Provider::Groq => {
+                !self.effective_api_key().is_empty()
+            }
             Provider::Openai => !self.api_base_url().is_empty() && !self.openai.model.is_empty(),
         }
     }
@@ -578,7 +667,7 @@ impl Settings {
     /// What is missing, as a sentence for the user.
     pub fn setup_hint(&self) -> String {
         match self.provider {
-            Provider::Gemini | Provider::Nvidia => format!(
+            Provider::Gemini | Provider::Nvidia | Provider::Groq => format!(
                 "No {} API key is set. Open Settings and paste your key ({}).",
                 self.provider_label(),
                 self.provider.key_help()
@@ -607,6 +696,13 @@ impl Settings {
                     crate::openai::NVIDIA_BASE_URL.to_string()
                 } else {
                     self.nvidia.base_url.clone()
+                }
+            }),
+            Provider::Groq => env("GAGENT_GROQ_BASE_URL").unwrap_or_else(|| {
+                if self.groq.base_url.is_empty() {
+                    crate::openai::GROQ_BASE_URL.to_string()
+                } else {
+                    self.groq.base_url.clone()
                 }
             }),
             Provider::Openai => {
@@ -751,6 +847,59 @@ mod tests {
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().contains("corrupt"));
         assert!(moved);
+    }
+
+    #[test]
+    fn the_request_limit_is_automatic_on_nvidia_only() {
+        let mut s = Settings::default();
+        s.provider = Provider::Nvidia;
+        assert_eq!(s.rate_limit(), NVIDIA_AUTO_REQUESTS_PER_MINUTE);
+        s.requests_per_minute = 12;
+        assert_eq!(s.rate_limit(), 12);
+        s.provider = Provider::Gemini;
+        s.requests_per_minute = 0;
+        assert_eq!(s.rate_limit(), 0);
+        s.requests_per_minute = 100_000;
+        s.normalize();
+        assert_eq!(s.requests_per_minute, 600);
+    }
+
+    #[test]
+    fn a_provider_is_ready_when_it_has_a_key() {
+        let mut s = Settings::default();
+        s.api_key = "AIza-test".into();
+        s.nvidia.api_key = String::new();
+        s.openai.base_url = String::new();
+        assert!(s.provider_ready(Provider::Gemini));
+        assert!(!s.provider_ready(Provider::Openai));
+        s.openai.base_url = "http://localhost:11434/v1".into();
+        s.openai.model = "llama3".into();
+        assert!(s.provider_ready(Provider::Openai));
+    }
+
+    #[test]
+    fn groq_is_a_provider_with_its_own_key_and_address() {
+        assert_eq!(Provider::from_name("groq"), Some(Provider::Groq));
+        assert_eq!(Provider::Groq.id(), "groq");
+        assert!(Provider::ALL.contains(&Provider::Groq));
+        let mut s = Settings::default();
+        s.provider = Provider::Groq;
+        s.groq.api_key = String::new();
+        if std::env::var("GROQ_API_KEY").is_err() {
+            assert!(!s.is_configured());
+        }
+        s.groq.api_key = "gsk_test".into();
+        assert!(s.is_configured());
+        assert_eq!(s.api_base_url(), crate::openai::GROQ_BASE_URL);
+        assert_eq!(s.active_model(), DEFAULT_GROQ_MODEL);
+        assert_eq!(s.rate_limit(), GROQ_AUTO_REQUESTS_PER_MINUTE);
+        assert!(s.preset_models().iter().any(|m| m == DEFAULT_GROQ_MODEL));
+        assert!(s.setup_hint().contains("console.groq.com/keys"), "{}", s.setup_hint());
+        // Settings saved by an older version, without Groq, still load with Groq's defaults.
+        let old: Settings = serde_json::from_str(r#"{"provider":"nvidia"}"#).unwrap();
+        assert_eq!(old.groq.model, DEFAULT_GROQ_MODEL);
+        assert_eq!(old.groq.base_url, crate::openai::GROQ_BASE_URL);
+        assert!(old.auto_failover && !old.auto_pick);
     }
 
     #[test]

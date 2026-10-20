@@ -724,6 +724,11 @@ fn settings_form(
                 &mut d.nvidia.model,
                 Some(&mut d.nvidia.base_url),
             ),
+            crate::config::Provider::Groq => (
+                &mut d.groq.api_key,
+                &mut d.groq.model,
+                Some(&mut d.groq.base_url),
+            ),
             crate::config::Provider::Openai => (
                 &mut d.openai.api_key,
                 &mut d.openai.model,
@@ -750,6 +755,7 @@ fn settings_form(
                     .hint_text(match provider {
                         crate::config::Provider::Gemini => "AIza...",
                         crate::config::Provider::Nvidia => "nvapi-...",
+                        crate::config::Provider::Groq => "gsk_...",
                         crate::config::Provider::Openai => "(optional for local servers)",
                     })
                     .desired_width(260.0),
@@ -789,6 +795,7 @@ fn settings_form(
             let help = match provider {
                 crate::config::Provider::Gemini => "Free key: aistudio.google.com/apikey. Leave empty to use the GEMINI_API_KEY environment variable.",
                 crate::config::Provider::Nvidia => "Create a key at build.nvidia.com (it starts with nvapi-). Leave empty to use the NVIDIA_API_KEY environment variable.",
+                crate::config::Provider::Groq => "Create a key at console.groq.com/keys (it starts with gsk_). Leave empty to use the GROQ_API_KEY environment variable.",
                 crate::config::Provider::Openai => "OpenAI, OpenRouter, Ollama (http://localhost:11434/v1), LM Studio, vLLM and others. The address must end in /v1.",
             };
             ui.add(egui::Label::new(RichText::new(help).small().color(theme::faint())).wrap());
@@ -799,8 +806,12 @@ fn settings_form(
                     .selected_text(model.as_str())
                     .width(300.0)
                     .show_ui(ui, |ui| {
-                        for m in &app.models {
-                            ui.selectable_value(model, m.clone(), m);
+                        for m in crate::models::picker_list(&app.models, model.as_str(), false) {
+                            ui.selectable_value(
+                                model,
+                                m.clone(),
+                                format!("{}{}", crate::models::label(&m), crate::modelstats::hint(&m)),
+                            );
                         }
                     });
             });
@@ -846,6 +857,24 @@ fn settings_form(
                 "The task stops when all its requests together reach this many tokens. 0 means no limit.",
             );
         });
+        ui.checkbox(
+            &mut d.auto_pick,
+            "Choose the best model for every message automatically (Gemini, NVIDIA, Groq: what each does best, what is left of its limits)",
+        );
+        ui.checkbox(
+            &mut d.auto_failover,
+            "When a model runs out of quota or fails, go on with another one",
+        );
+        field(ui, "Requests per minute", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut d.requests_per_minute)
+                    .range(0..=600)
+                    .speed(1),
+            )
+            .on_hover_text(
+                "0 is automatic: 35 on NVIDIA's free endpoint (it allows about 40 for the whole account, whatever the model), no limit elsewhere.",
+            );
+        });
         field(ui, "Max steps per task", |ui| {
             ui.add(
                 egui::DragValue::new(&mut d.max_steps)
@@ -866,6 +895,11 @@ fn settings_form(
                     }
                 });
         });
+        ui.label(
+            RichText::new("AI models can be wrong and the commands run on your own computer. Look at the Changes before you apply them. See SECURITY.md.")
+                .small()
+                .color(theme::faint()),
+        );
         field(ui, "Check files after writing", |ui| {
             egui::ComboBox::from_id_salt("settings_auto_check")
                 .selected_text(d.auto_check.label())

@@ -41,6 +41,9 @@ pub struct SessionMeta {
     pub project: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set for a team project: the goal and the agents.
+    #[serde(default)]
+    pub team: Option<crate::team::TeamConfig>,
 }
 
 /// A conversation: what the user sees plus the raw Gemini history.
@@ -67,10 +70,19 @@ impl Session {
                 project: project.to_string(),
                 created_at: now,
                 updated_at: now,
+                team: None,
             },
             items: Vec::new(),
             history: Vec::new(),
         }
+    }
+
+    /// A team project in `project`.
+    pub fn new_team(project: &str, title: &str, team: crate::team::TeamConfig) -> Self {
+        let mut session = Session::new(project);
+        session.meta.title = truncate_end(title.trim(), 48);
+        session.meta.team = Some(team);
+        session
     }
 
     /// Names the session after its first user message.
@@ -171,7 +183,7 @@ impl SessionStore {
         )?;
         write_atomic(
             &self.history_path(&session.meta.id),
-            &serde_json::to_vec(&session.history)?,
+            &serde_json::to_vec(&crate::vision::without_images(&session.history))?,
         )?;
         Ok(())
     }

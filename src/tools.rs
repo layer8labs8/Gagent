@@ -48,6 +48,8 @@ pub struct ToolContext {
     pub approvals: Arc<crate::permission::Approvals>,
     /// Which parts of which files were read lately (to answer a pointless re-read cheaply).
     pub reads: std::sync::Mutex<ReadLog>,
+    /// The model in use can see pictures, so `view_image` and `screenshot` are offered.
+    pub vision: bool,
 }
 
 /// Remembers recent `read_file` results of one task.
@@ -56,6 +58,8 @@ pub struct ReadLog {
     /// Number of tool calls so far.
     calls: u64,
     seen: Vec<SeenRead>,
+    /// Pictures shown to the model in this task.
+    images_used: u32,
 }
 
 struct SeenRead {
@@ -162,6 +166,11 @@ pub struct ToolOutput {
     pub mutated: bool,
     /// Short result for the activity log, e.g. `exit 1`.
     pub summary: String,
+    /// Pictures for the model to look at (only models that can see get these tools).
+    pub images: Vec<crate::vision::Image>,
+    /// The call itself was malformed (unknown tool, broken JSON, missing argument): a slip of
+    /// the model, not a problem of the project.
+    pub slip: bool,
 }
 
 impl ToolOutput {
@@ -171,6 +180,8 @@ impl ToolOutput {
             text: text.into(),
             mutated,
             summary: summary.into(),
+            images: Vec::new(),
+            slip: false,
         }
     }
 
@@ -181,7 +192,14 @@ impl ToolOutput {
             summary: truncate_end(text.lines().next().unwrap_or(""), 120),
             text,
             mutated: false,
+            images: Vec::new(),
+            slip: false,
         }
+    }
+
+    fn with_images(mut self, images: Vec<crate::vision::Image>) -> Self {
+        self.images = images;
+        self
     }
 }
 
@@ -190,8 +208,13 @@ type ToolResult = Result<ToolOutput, String>;
 /// Function declarations sent to the model. They are sent with every request, so the
 /// descriptions are kept short.
 pub fn declarations() -> Value {
+    declarations_for(false)
+}
+
+/// The declarations for a model; `vision` adds the two tools that need eyes.
+pub fn declarations_for(vision: bool) -> Value {
     let path = |what: &str| json!({"type": "STRING", "description": what});
-    let tools = vec![
+    let mut tools = vec![
         json!({
             "name": "list_files",
             "description": "List files as relative paths (build and dependency folders are hidden).",
@@ -280,11 +303,40 @@ pub fn declarations() -> Value {
             }
         }),
     ];
+    if vision {
+        tools.push(json!({
+            "name": "view_image",
+            "description": "Look at a picture file of the project (PNG, JPEG, GIF, WebP; up to 4 MB). Costs many tokens: use it when it helps.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": { "path": path("Picture file.") },
+                "required": ["path"]
+            }
+        }));
+        tools.push(json!({
+            "name": "screenshot",
+            "description": "Take a screenshot of an HTML file of the project or of a local server and look at it. Use it to check layout and looks.",
+            "parameters": {
+                "type": "OBJECT",
+                "properties": {
+                    "path": path("HTML file of the project."),
+                    "url": path("Instead of path: http://localhost:PORT/... of a server you started in the same command."),
+                    "width": {"type": "INTEGER", "description": "Window width, default 1280."},
+                    "height": {"type": "INTEGER", "description": "Window height, default 800."}
+                }
+            }
+        }));
+    }
     Value::Array(tools)
 }
 
 /// One-line description of a call for the activity log.
 pub fn describe_call(name: &str, args: &Value) -> String {
+    let name = canonical_tool_name(name);
+    let name = name.as_str();
+    if args.get(INVALID_ARGS).is_some() {
+        return format!("Call {name} (arguments were not valid JSON)");
+    }
     let s = |keys: &[&str]| arg_str(args, keys).unwrap_or_default();
     match name {
         "list_files" => {
@@ -303,6 +355,12 @@ pub fn describe_call(name: &str, args: &Value) -> String {
         "edit_file" => format!("Edit {}", s(&["path", "file_path"])),
         "delete_file" => format!("Delete {}", s(&["path", "file_path"])),
         "search_files" => format!("Search for `{}`", truncate_end(&s(&["pattern"]), 60)),
+        "view_image" => format!("Look at {}", s(&["path", "file_path"])),
+        "screenshot" => {
+            let target = s(&["url"]);
+            let target = if target.is_empty() { s(&["path", "file"]) } else { target };
+            format!("Screenshot of {}", truncate_end(&target, 80))
+        }
         "run_command" => {
             let cmd = s(&["command"]);
             let first = cmd.lines().next().unwrap_or("");
@@ -313,22 +371,195 @@ pub fn describe_call(name: &str, args: &Value) -> String {
     }
 }
 
+/// Key under which a call whose arguments were not valid JSON carries what the model sent
+/// (set where the reply is read, answered with a clear error by [`execute`]).
+pub const INVALID_ARGS: &str = "_invalid_arguments";
+
+const TOOL_NAMES: [&str; 9] = [
+    "list_files",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "delete_file",
+    "search_files",
+    "run_command",
+    "view_image",
+    "screenshot",
+];
+
+/// Names that models use for our tools (they know other agents), and what they mean.
+const TOOL_ALIASES: &[(&str, &str)] = &[
+    ("bash", "run_command"),
+    ("shell", "run_command"),
+    ("sh", "run_command"),
+    ("run", "run_command"),
+    ("exec", "run_command"),
+    ("execute", "run_command"),
+    ("terminal", "run_command"),
+    ("run_bash", "run_command"),
+    ("run_shell", "run_command"),
+    ("execute_command", "run_command"),
+    ("read", "read_file"),
+    ("cat", "read_file"),
+    ("open_file", "read_file"),
+    ("view_file", "read_file"),
+    ("write", "write_file"),
+    ("create_file", "write_file"),
+    ("save_file", "write_file"),
+    ("edit", "edit_file"),
+    ("replace", "edit_file"),
+    ("str_replace", "edit_file"),
+    ("patch_file", "edit_file"),
+    ("ls", "list_files"),
+    ("list", "list_files"),
+    ("list_dir", "list_files"),
+    ("list_directory", "list_files"),
+    ("grep", "search_files"),
+    ("search", "search_files"),
+    ("delete", "delete_file"),
+    ("remove_file", "delete_file"),
+    ("rm", "delete_file"),
+];
+
+/// The tool a name from the model stands for. Cleans leftovers of other formats
+/// (`run_command<|channel|>commentary`, `functions.read_file`, `Bash`); a name that means
+/// nothing is returned as it is (trimmed).
+pub fn canonical_tool_name(raw: &str) -> String {
+    let raw = raw.trim();
+    let mut name = raw;
+    if let Some(i) = name.find("<|") {
+        name = &name[..i];
+    }
+    for prefix in [
+        "functions.",
+        "functions/",
+        "function.",
+        "tools.",
+        "tool.",
+        "default_api.",
+        "api.",
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            name = rest;
+            break;
+        }
+    }
+    let name = name
+        .trim()
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '`' | '<' | '>' | '|'));
+    if name.is_empty() {
+        return raw.to_string();
+    }
+    let key = name.to_ascii_lowercase().replace(['-', ' '], "_");
+    if TOOL_NAMES.contains(&key.as_str()) {
+        return key;
+    }
+    TOOL_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == key)
+        .map_or_else(|| name.to_string(), |(_, tool)| tool.to_string())
+}
+
+/// How to call a tool, as an example (shown when a call was malformed).
+fn usage_of(name: &str) -> &'static str {
+    match name {
+        "list_files" => r#"{"path": "src", "depth": 2}  (both optional)"#,
+        "read_file" => r#"{"path": "src/main.py", "start_line": 1, "end_line": 80}  (only path is required)"#,
+        "write_file" => r#"{"path": "src/main.py", "content": "the complete file text"}"#,
+        "edit_file" => r#"{"path": "src/main.py", "old_text": "exact old text", "new_text": "new text"}"#,
+        "delete_file" => r#"{"path": "old.txt"}"#,
+        "search_files" => r#"{"pattern": "def main", "path": "src", "glob": "*.py"}  (only pattern is required)"#,
+        "run_command" => r#"{"command": "python3 main.py"}  (timeout_secs is optional)"#,
+        "view_image" => r#"{"path": "shot.png"}"#,
+        "screenshot" => r#"{"path": "index.html"} or {"url": "http://localhost:8000/"}"#,
+        _ => "",
+    }
+}
+
+fn unknown_tool_message(ctx: &ToolContext, name: &str) -> String {
+    let names: Vec<String> = declarations_for(ctx.vision)
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|d| d["name"].as_str().map(str::to_string))
+        .collect();
+    format!(
+        "unknown tool '{name}'. The tools are: {}. Call one of them by exactly that name.",
+        names.join(", ")
+    )
+}
+
+fn invalid_args_message(name: &str, raw: &str) -> String {
+    let usage = usage_of(name);
+    let how = if usage.is_empty() {
+        String::new()
+    } else {
+        format!(" Send one JSON object like {name} {usage}.")
+    };
+    format!(
+        "the arguments of {name} were not valid JSON (received: {}).{how} Put the whole call in one object, escape quotes and line breaks inside strings, and write a very long file in smaller parts.",
+        truncate_end(raw, 160)
+    )
+}
+
+/// Adds what the model sent and an example to a "missing argument" error.
+fn with_usage(name: &str, args: &Value, error: &str) -> String {
+    let sent = match args.as_object() {
+        Some(o) if !o.is_empty() => format!(
+            "You sent: {}",
+            o.keys().cloned().collect::<Vec<_>>().join(", ")
+        ),
+        _ => "You sent no arguments".to_string(),
+    };
+    let usage = usage_of(name);
+    if usage.is_empty() {
+        format!("{error}. {sent}.")
+    } else {
+        format!("{error}. {sent}. Usage: {name} {usage}")
+    }
+}
+
+/// True for errors that come from a malformed call and not from the project.
+fn is_slip(error: &str) -> bool {
+    error.starts_with("unknown tool")
+        || error.starts_with("missing required argument")
+        || error.contains("not valid JSON")
+}
+
 /// Runs one tool call. Never panics on bad input; errors become text for the model.
 pub fn execute(ctx: &ToolContext, name: &str, args: &Value) -> ToolOutput {
     ctx.reads.lock().unwrap_or_else(|p| p.into_inner()).tick();
-    let result = match name {
-        "list_files" => list_files(ctx, args),
-        "read_file" => read_file(ctx, args),
-        "write_file" => write_file(ctx, args),
-        "edit_file" => edit_file(ctx, args),
-        "delete_file" => delete_file(ctx, args),
-        "search_files" => search_files(ctx, args),
-        "run_command" => run_command(ctx, args),
-        other => Err(format!("unknown tool '{other}'")),
+    let name = canonical_tool_name(name);
+    let name = name.as_str();
+    let result = if let Some(raw) = args.get(INVALID_ARGS) {
+        Err(invalid_args_message(name, raw.as_str().unwrap_or_default()))
+    } else {
+        match name {
+            "list_files" => list_files(ctx, args),
+            "read_file" => read_file(ctx, args),
+            "write_file" => write_file(ctx, args),
+            "edit_file" => edit_file(ctx, args),
+            "delete_file" => delete_file(ctx, args),
+            "search_files" => search_files(ctx, args),
+            "run_command" => run_command(ctx, args),
+            "view_image" => view_image(ctx, args),
+            "screenshot" => screenshot(ctx, args),
+            other => Err(unknown_tool_message(ctx, other)),
+        }
     };
     let mut out = match result {
         Ok(out) => out,
-        Err(e) => ToolOutput::err(format!("Error: {e}")),
+        Err(e) => {
+            let slip = is_slip(&e);
+            let e = if e.starts_with("missing required argument") {
+                with_usage(name, args, &e)
+            } else {
+                e
+            };
+            let mut out = ToolOutput::err(format!("Error: {e}"));
+            out.slip = slip;
+            out
+        }
     };
     // A file was just written: check it now, so mistakes show up in this very step
     // instead of many steps (and many thousand tokens) later.
@@ -470,6 +701,94 @@ fn required_str(args: &Value, keys: &[&str]) -> Result<String, String> {
     arg_str(args, keys).ok_or_else(|| format!("missing required argument '{}'", keys[0]))
 }
 
+/// The text of a file to write. A model that writes a JSON file sometimes sends the JSON
+/// itself instead of a string that holds it.
+fn content_arg(args: &Value) -> Result<String, String> {
+    for key in ["content", "contents", "text", "file_text"] {
+        match args.get(key) {
+            Some(Value::String(s)) => return Ok(s.clone()),
+            Some(v @ (Value::Object(_) | Value::Array(_))) => {
+                return serde_json::to_string_pretty(v)
+                    .map(|s| s + "\n")
+                    .map_err(|e| e.to_string());
+            }
+            _ => {}
+        }
+    }
+    Err("missing required argument 'content'".into())
+}
+
+/// The command line of `run_command`. A model that knows other agents sometimes sends the
+/// words as a list (`["bash", "-lc", "make test"]`).
+fn command_arg(args: &Value) -> Result<String, String> {
+    for key in ["command", "cmd"] {
+        match args.get(key) {
+            Some(Value::String(s)) => return Ok(s.clone()),
+            Some(Value::Array(items)) => {
+                let words: Vec<&str> = items.iter().filter_map(Value::as_str).collect();
+                if words.len() >= 3
+                    && matches!(words[0], "bash" | "sh" | "/bin/bash" | "/bin/sh")
+                    && words[1].starts_with('-')
+                    && words[1].ends_with('c')
+                {
+                    return Ok(words[2..].join(" "));
+                }
+                if !words.is_empty() {
+                    return Ok(words
+                        .iter()
+                        .map(|w| {
+                            if w.contains(' ') {
+                                shell_quote(w)
+                            } else {
+                                w.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "));
+                }
+            }
+            _ => {}
+        }
+    }
+    Err("missing required argument 'command'".into())
+}
+
+/// A short tip for the model when a command failed in a way that is usually a slip of the
+/// model and not a problem of the project.
+fn command_hint(command: &str, exit_code: Option<i32>, output: &str) -> Option<&'static str> {
+    if exit_code.is_none() || exit_code == Some(0) {
+        return None;
+    }
+    let lower = output.to_ascii_lowercase();
+    let inline = [
+        "python -c",
+        "python3 -c",
+        "node -e",
+        "node --eval",
+        "perl -e",
+        "ruby -e",
+    ]
+    .iter()
+    .any(|p| command.contains(p));
+    if inline
+        && ["syntaxerror", "syntax error", "unexpected eof", "unterminated", "unexpected token"]
+            .iter()
+            .any(|m| lower.contains(m))
+    {
+        return Some("[hint: code inside quotes on the command line breaks easily. Write the code to a file with write_file and run that file.]");
+    }
+    if exit_code == Some(127)
+        || lower.contains("command not found")
+        || lower.contains("is not recognized")
+    {
+        return Some("[hint: that program is not installed here or has another name (`python` and `python3` differ between systems). See the sandbox tools line, or check with `command -v NAME`.]");
+    }
+    if lower.contains("no such file or directory") || lower.contains("can't open file") {
+        return Some("[hint: a path was not found. Paths are relative to the workspace root, which is the working directory; check with list_files.]");
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // File tools
 // ---------------------------------------------------------------------------
@@ -608,7 +927,7 @@ fn read_file(ctx: &ToolContext, args: &Value) -> ToolResult {
 
 fn write_file(ctx: &ToolContext, args: &Value) -> ToolResult {
     let rel = required_str(args, &["path", "file_path", "filepath", "filename"])?;
-    let content = required_str(args, &["content", "contents", "text", "file_text"])?;
+    let content = content_arg(args)?;
     if content.len() > MAX_FILE_BYTES {
         return Err(format!(
             "content is too large ({}); split it into several files",
@@ -867,8 +1186,93 @@ fn search_files(ctx: &ToolContext, args: &Value) -> ToolResult {
 // Sandbox command
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Pictures
+// ---------------------------------------------------------------------------
+
+fn need_vision(ctx: &ToolContext) -> Result<(), String> {
+    if ctx.vision {
+        Ok(())
+    } else {
+        Err("the model in use cannot see pictures. Ask the user to pick a model marked [images] in the model menu".into())
+    }
+}
+
+/// Counts one more picture for this task; refuses after the limit.
+fn take_picture_slot(ctx: &ToolContext) -> Result<u32, String> {
+    let mut log = ctx.reads.lock().unwrap_or_else(|p| p.into_inner());
+    if log.images_used >= crate::vision::MAX_IMAGES_PER_TASK {
+        return Err(format!(
+            "you already looked at {} pictures in this task; work from what you saw",
+            crate::vision::MAX_IMAGES_PER_TASK
+        ));
+    }
+    log.images_used += 1;
+    Ok(log.images_used)
+}
+
+fn view_image(ctx: &ToolContext, args: &Value) -> ToolResult {
+    let rel = required_str(args, &["path", "file_path", "filepath", "filename"])?;
+    need_vision(ctx)?;
+    let path = ctx.work.resolve(&rel).map_err(|e| e.to_string())?;
+    if !path.is_file() {
+        return Err(format!("file '{rel}' does not exist"));
+    }
+    let image = crate::vision::load(&path)?;
+    take_picture_slot(ctx)?;
+    Ok(ToolOutput::ok(format!("[picture: {rel}]"), "1 picture", false).with_images(vec![image]))
+}
+
+fn screenshot(ctx: &ToolContext, args: &Value) -> ToolResult {
+    need_vision(ctx)?;
+    let url_arg = arg_str(args, &["url"]).filter(|u| !u.trim().is_empty());
+    let path_arg = arg_str(args, &["path", "file", "file_path"]).filter(|p| !p.trim().is_empty());
+    let (url, label) = match (url_arg, path_arg) {
+        (Some(u), _) => {
+            let u = u.trim().to_string();
+            if !crate::vision::is_local_url(&u) {
+                return Err("only http://localhost addresses can be opened; use path for a file of the project".into());
+            }
+            (u.clone(), u)
+        }
+        (None, Some(p)) => {
+            let abs = ctx.work.resolve(&p).map_err(|e| e.to_string())?;
+            if !abs.is_file() {
+                return Err(format!("file '{p}' does not exist"));
+            }
+            (crate::vision::file_url(&abs), p)
+        }
+        (None, None) => {
+            return Err("give the path of an HTML file of the project, or the url of a local server".into())
+        }
+    };
+    let width = arg_u64(args, &["width"]).unwrap_or(1280).clamp(320, 2000) as u32;
+    let height = arg_u64(args, &["height"]).unwrap_or(800).clamp(240, 3000) as u32;
+    ctx.approvals.authorize(
+        &format!("screenshot {label}"),
+        ctx.work.root(),
+        false,
+        &ctx.cancel,
+    )?;
+    let browser = crate::vision::find_browser().ok_or_else(|| {
+        "no browser was found for screenshots (Edge, Chrome, Chromium or Brave). Tell the user".to_string()
+    })?;
+    let n = take_picture_slot(ctx)?;
+    let out_rel = format!(".gagent/screens/shot-{n}.png");
+    let out = ctx.work.root().join(&out_rel);
+    let profile = ctx.work.root().join(".gagent/browser-profile");
+    crate::vision::render(&browser, &url, &out, &profile, width, height, &ctx.cancel)?;
+    let image = crate::vision::load(&out)?;
+    Ok(ToolOutput::ok(
+        format!("Screenshot of {label} at {width}x{height}, saved as {out_rel}."),
+        "screenshot",
+        false,
+    )
+    .with_images(vec![image]))
+}
+
 fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
-    let command = required_str(args, &["command", "cmd"])?;
+    let command = command_arg(args)?;
     let cwd =
         normalize_rel(&arg_str(args, &["cwd", "dir", "working_directory"]).unwrap_or_default())
             .map_err(|e| e.to_string())?;
@@ -917,6 +1321,10 @@ fn run_command(ctx: &ToolContext, args: &Value) -> ToolResult {
     }
     if cut || result.truncated {
         text.push_str("\n[output was shortened]");
+    }
+    if let Some(hint) = command_hint(&req.command, result.exit_code, &result.output) {
+        text.push('\n');
+        text.push_str(hint);
     }
     let summary = if result.timed_out {
         format!("timed out ({timeout}s)")
@@ -1030,6 +1438,7 @@ mod tests {
                 crate::config::PermissionMode::Auto,
             )),
             reads: Default::default(),
+            vision: false,
         };
         Fx {
             dir,
@@ -1624,6 +2033,72 @@ mod tests {
         assert!(asked[1].starts_with("install:pip | pip install"), "{asked:?}");
     }
 
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0x0D, 0x49, 0x48, 0x44, 0x52, 0, 0, 0,
+        1, 0, 0, 0, 1, 8, 6, 0, 0, 0,
+    ];
+
+    #[test]
+    fn pictures_are_only_for_models_that_can_see() {
+        let mut f = fx(vec![]);
+        std::fs::write(f.dir.path().join("a.png"), PNG).unwrap();
+        std::fs::write(f.dir.path().join("a.txt"), "hello").unwrap();
+        let r = call(&f, "view_image", json!({"path":"a.png"}));
+        assert!(!r.ok && r.text.contains("cannot see"), "{}", r.text);
+        assert!(r.images.is_empty());
+
+        f.ctx.vision = true;
+        let r = call(&f, "view_image", json!({"path":"a.png"}));
+        assert!(r.ok, "{}", r.text);
+        assert_eq!(r.images.len(), 1);
+        assert_eq!(r.images[0].mime, "image/png");
+        assert!(!call(&f, "view_image", json!({"path":"a.txt"})).ok);
+        assert!(!call(&f, "view_image", json!({"path":"missing.png"})).ok);
+        assert!(!call(&f, "view_image", json!({"path":"../a.png"})).ok);
+        // After the limit the model must work from what it saw.
+        for _ in 0..crate::vision::MAX_IMAGES_PER_TASK {
+            call(&f, "view_image", json!({"path":"a.png"}));
+        }
+        let r = call(&f, "view_image", json!({"path":"a.png"}));
+        assert!(!r.ok && r.text.contains("already looked"), "{}", r.text);
+    }
+
+    #[test]
+    fn the_picture_tools_are_declared_only_for_models_that_can_see() {
+        let names = |v: Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let plain = names(declarations_for(false));
+        assert!(!plain.contains(&"screenshot".to_string()));
+        let seeing = names(declarations_for(true));
+        assert!(seeing.contains(&"screenshot".to_string()) && seeing.contains(&"view_image".to_string()));
+        assert_eq!(seeing.len(), plain.len() + 2);
+        let size = declarations_for(true).to_string().len();
+        assert!(size < 5_000, "{size} chars");
+    }
+
+    #[test]
+    fn screenshot_checks_what_it_is_asked_to_open() {
+        let mut f = fx(vec![]);
+        f.ctx.vision = true;
+        std::fs::write(f.dir.path().join("page.html"), "<h1>hi</h1>").unwrap();
+        let r = call(&f, "screenshot", json!({}));
+        assert!(!r.ok && r.text.contains("give the path"), "{}", r.text);
+        let r = call(&f, "screenshot", json!({"url":"https://example.com"}));
+        assert!(!r.ok && r.text.contains("localhost"), "{}", r.text);
+        let r = call(&f, "screenshot", json!({"path":"nope.html"}));
+        assert!(!r.ok && r.text.contains("does not exist"), "{}", r.text);
+        let r = call(&f, "screenshot", json!({"path":"../../etc/passwd"}));
+        assert!(!r.ok, "{}", r.text);
+        f.ctx.vision = false;
+        let r = call(&f, "screenshot", json!({"path":"page.html"}));
+        assert!(!r.ok && r.text.contains("cannot see"), "{}", r.text);
+    }
+
     #[test]
     fn delete_and_unknown_tool() {
         let f = fx(vec![]);
@@ -1633,6 +2108,130 @@ mod tests {
         assert!(!call(&f, "delete_file", json!({"path":"x.txt"})).ok);
         let u = call(&f, "frobnicate", json!({}));
         assert!(!u.ok && u.text.contains("unknown tool"));
+    }
+
+    fn bad_args(raw: &str) -> Value {
+        let mut m = serde_json::Map::new();
+        m.insert(INVALID_ARGS.to_string(), json!(raw));
+        Value::Object(m)
+    }
+
+    #[test]
+    fn names_from_other_agents_and_other_formats_are_understood() {
+        for (raw, want) in [
+            ("run_command<|channel|>commentary", "run_command"),
+            ("functions.read_file", "read_file"),
+            ("Bash", "run_command"),
+            ("str-replace", "edit_file"),
+            ("  LS ", "list_files"),
+            ("tools.write_file", "write_file"),
+            ("frobnicate", "frobnicate"),
+        ] {
+            assert_eq!(canonical_tool_name(raw), want, "{raw}");
+        }
+        assert_eq!(canonical_tool_name("<|channel|>"), "<|channel|>");
+        assert_eq!(
+            describe_call("bash", &json!({"command": "ls"})),
+            "Run `ls`"
+        );
+    }
+
+    #[test]
+    fn an_invented_name_still_runs_and_an_unknown_one_lists_the_real_tools() {
+        let f = fx(vec![ExecResult {
+            exit_code: Some(0),
+            output: "hi\n".into(),
+            ..Default::default()
+        }]);
+        let r = call(&f, "bash", json!({"command": "echo hi"}));
+        assert!(r.ok && r.text.contains("hi"), "{}", r.text);
+        assert!(!r.slip);
+        let u = call(&f, "frobnicate", json!({}));
+        assert!(!u.ok && u.slip);
+        assert!(
+            u.text.contains("run_command") && u.text.contains("read_file"),
+            "{}",
+            u.text
+        );
+    }
+
+    #[test]
+    fn a_missing_argument_says_what_was_sent_and_how_to_call() {
+        let f = fx(vec![]);
+        let r = call(&f, "write_file", json!({"path": "a.txt"}));
+        assert!(!r.ok && r.slip);
+        assert!(
+            r.text.contains("You sent: path") && r.text.contains("Usage: write_file"),
+            "{}",
+            r.text
+        );
+        let r = call(&f, "read_file", json!({}));
+        assert!(r.text.contains("You sent no arguments"), "{}", r.text);
+        // A file that is not there is a problem of the project, not a slip of the call.
+        let r = call(&f, "read_file", json!({"path": "nope.txt"}));
+        assert!(!r.ok && !r.slip);
+    }
+
+    #[test]
+    fn arguments_that_were_not_json_are_reported_as_such() {
+        let f = fx(vec![]);
+        let r = call(&f, "write_file", bad_args("{\"path\": \"a.py\", \"content\": "));
+        assert!(!r.ok && r.slip);
+        assert!(
+            r.text.contains("not valid JSON") && r.text.contains("write_file"),
+            "{}",
+            r.text
+        );
+        assert!(!f.ctx.work.root().join("a.py").exists());
+        assert!(describe_call("write_file", &bad_args("x")).contains("not valid JSON"));
+    }
+
+    #[test]
+    fn json_as_file_content_and_commands_as_lists_work() {
+        let f = fx(vec![ExecResult {
+            exit_code: Some(0),
+            output: "ok\n".into(),
+            ..Default::default()
+        }]);
+        let w = call(
+            &f,
+            "write_file",
+            json!({"path": "package.json", "content": {"name": "app", "version": "1.0.0"}}),
+        );
+        assert!(w.ok, "{}", w.text);
+        let text = fs::read_to_string(f.ctx.work.root().join("package.json")).unwrap();
+        assert!(
+            serde_json::from_str::<Value>(&text).is_ok() && text.contains("\"name\": \"app\""),
+            "{text}"
+        );
+        let r = call(
+            &f,
+            "run_command",
+            json!({"command": ["bash", "-lc", "make test"]}),
+        );
+        assert!(r.ok, "{}", r.text);
+        assert_eq!(f.sandbox.commands.lock().unwrap()[0], "make test");
+        assert_eq!(
+            command_arg(&json!({"command": ["python3", "my script.py", "-v"]})).unwrap(),
+            "python3 'my script.py' -v"
+        );
+    }
+
+    #[test]
+    fn failed_commands_get_a_tip_for_the_usual_slips() {
+        let quoting = command_hint(
+            "python3 -c \"print('a\nb')\"",
+            Some(1),
+            "  File \"<string>\", line 1\nSyntaxError: unterminated string literal",
+        );
+        assert!(quoting.unwrap().contains("write_file"));
+        let missing = command_hint("python3 app.py", Some(127), "bash: python3: command not found");
+        assert!(missing.unwrap().contains("command -v"));
+        let path = command_hint("python3 app.py", Some(2), "python3: can't open file 'app.py'");
+        assert!(path.unwrap().contains("list_files"));
+        // A command that worked, or a failure of the program itself, gets no tip.
+        assert!(command_hint("python3 -c 'x'", Some(0), "SyntaxError").is_none());
+        assert!(command_hint("pytest", Some(1), "1 failed").is_none());
     }
 
     #[test]

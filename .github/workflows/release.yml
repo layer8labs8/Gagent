@@ -68,24 +68,33 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
       - name: Checksums
         run: cd artifacts && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes (what is new, from CHANGELOG.md, and how to install)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v v="$VERSION" '$0 == "## " v {found=1; next} found && /^## / {exit} found' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then echo "See CHANGELOG.md." > notes.md; fi
+          {
+            echo
+            echo "---"
+            echo
+            echo '**Windows:** download `Gagent.exe` and start it. The agent runs its commands with bash, which comes with [Git for Windows](https://git-scm.com) (`winget install Git.Git`). `Gagent-windows-x86_64.zip` also holds `gagent-cli.exe` and the install script.'
+            echo
+            echo '**Linux:** unpack `Gagent-linux-x86_64.tar.gz` and run `gagent`, or use `scripts/install-ubuntu.sh`.'
+            echo
+            echo 'Open **Settings**, pick a service and paste your API key (see the README for where to get one). Checksums are in `SHA256SUMS.txt`; the libraries built into Gagent and their licenses are in `THIRD-PARTY-LICENSES.txt`.'
+            echo
+            echo 'Gagent is free to use, not for sale (see `LICENSE`). AI models can be wrong and commands run on your own computer: read `SECURITY.md` and check the changes before you apply them.'
+          } >> notes.md
+          cat notes.md
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
-          generate_release_notes: true
+          body_path: notes.md
           prerelease: true
-          body: |
-            **Windows:** download `Gagent.exe` and start it. The agent runs its commands with bash, which comes with
-            [Git for Windows](https://git-scm.com) (`winget install Git.Git`). `Gagent-windows-x86_64.zip` also holds
-            `gagent-cli.exe` and the install script.
-
-            **Linux:** unpack `Gagent-linux-x86_64.tar.gz` and run `gagent`, or use `scripts/install-ubuntu.sh`.
-
-            Open **Settings**, pick a service and paste your API key (see the README for where to get one).
-            Checksums are in `SHA256SUMS.txt`. The libraries built into Gagent and their licenses are listed in
-            `THIRD-PARTY-LICENSES.txt`. Gagent is free to use, not for sale: see `LICENSE`.

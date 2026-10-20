@@ -221,6 +221,7 @@ fn ctx_for(r: &Rig) -> ToolContext {
         tools_note: Arc::new(Mutex::new(Some(String::new()))),
         approvals: Arc::new(Approvals::new(PermissionMode::Auto)),
         reads: Default::default(),
+        vision: false,
     }
 }
 

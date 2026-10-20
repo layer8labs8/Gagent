@@ -145,7 +145,62 @@ impl Engine {
             tools_note: self.tools_note.clone(),
             approvals: self.approvals.clone(),
             reads: Default::default(),
+            // With an automatic choice the model that sees is picked once a picture is in the chat.
+            vision: self.settings.auto_pick || crate::models::sees_images(self.settings.active_model()),
         })
+    }
+
+    /// The system prompt for a model that works with `ctx`.
+    pub fn prompt_for(&self, ctx: &ToolContext, model: &str) -> String {
+        let (sandbox_ready, wsl, host) = match &self.backend {
+            Backend::Docker => (
+                docker_status(&self.settings.sandbox.image).is_ready(),
+                false,
+                false,
+            ),
+            Backend::Wsl(distro) => (crate::wsl::wsl_status(distro).is_ok(), true, false),
+            Backend::Host(shell) => (shell.is_file(), false, true),
+        };
+        let tools = self
+            .tools_note
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_default();
+        system_prompt(&PromptInfo {
+            model,
+            workspace: &ctx.work,
+            opts: ctx.opts,
+            network: self.settings.sandbox.network,
+            sandbox_available: sandbox_ready,
+            wsl,
+            host,
+            vision: ctx.vision,
+            tools: &tools,
+        })
+    }
+
+    /// Runs a team project: the lead plans, then the agents do the tasks one by one.
+    /// Blocks until the project ends; run it on a worker thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_team(
+        &self,
+        goal: &str,
+        team: &crate::team::Team,
+        resume: bool,
+        review: &dyn Fn(&crate::team::Plan) -> bool,
+        emit: &dyn Fn(crate::team::TeamEvent),
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<(crate::team::TeamOutcome, Option<ApplyReport>)> {
+        let outcome = crate::team::run_team(self, goal, team, resume, review, emit, cancel)?;
+        let mut auto_applied = None;
+        if self.settings.auto_apply && !outcome.cancelled && !outcome.declined {
+            let report = self.apply_all()?;
+            if !report.applied.is_empty() || !report.skipped.is_empty() {
+                auto_applied = Some(report);
+            }
+        }
+        Ok((outcome, auto_applied))
     }
 
     /// Sends a user message through the agent and returns how it ended.
@@ -173,31 +228,7 @@ impl Engine {
         }
 
         let ctx = self.tool_context(cancel.clone())?;
-        let (sandbox_ready, wsl, host) = match &self.backend {
-            Backend::Docker => (
-                docker_status(&self.settings.sandbox.image).is_ready(),
-                false,
-                false,
-            ),
-            Backend::Wsl(distro) => (crate::wsl::wsl_status(distro).is_ok(), true, false),
-            Backend::Host(shell) => (shell.is_file(), false, true),
-        };
-        let tools = self
-            .tools_note
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-            .unwrap_or_default();
-        let prompt = system_prompt(&PromptInfo {
-            model: self.settings.active_model(),
-            workspace: &ctx.work,
-            opts: ctx.opts,
-            network: self.settings.sandbox.network,
-            sandbox_available: sandbox_ready,
-            wsl,
-            host,
-            tools: &tools,
-        });
+        let prompt = self.prompt_for(&ctx, self.settings.active_model());
         let cfg = AgentConfig {
             model: self.settings.active_model().to_string(),
             max_steps: self.settings.max_steps,

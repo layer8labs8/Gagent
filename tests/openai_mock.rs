@@ -56,6 +56,7 @@ fn agent_works_through_an_openai_compatible_server() {
             gagent::config::PermissionMode::Auto,
         )),
         reads: Default::default(),
+        vision: false,
     };
     let mock = MockGemini::start(vec![
         // Reasoning models put their thoughts in `reasoning_content`; it must be ignored.

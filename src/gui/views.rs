@@ -128,6 +128,19 @@ pub fn sidebar(app: &mut GagentApp, ui: &mut egui::Ui) {
             );
             if new_session.clicked() {
                 app.current = None;
+                app.project_draft = None;
+            }
+            ui.add_space(6.0);
+            let new_project = ui.add(
+                egui::Button::new(RichText::new("+  New project").color(theme::accent()).strong())
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, theme::border()))
+                    .corner_radius(CornerRadius::same(10))
+                    .min_size(Vec2::new(ui.available_width(), 34.0)),
+            )
+            .on_hover_text("Several AI agents build something together");
+            if new_project.clicked() {
+                app.open_project_draft();
             }
             ui.add_space(10.0);
 
@@ -200,7 +213,11 @@ fn sidebar_sessions(app: &mut GagentApp, ui: &mut egui::Ui) {
             ui.painter().text(
                 egui::pos2(rect.left() + 10.0, rect.center().y),
                 egui::Align2::LEFT_CENTER,
-                truncate_end(&s.title, 28),
+                if s.team.is_some() {
+                    format!("[team] {}", truncate_end(&s.title, 22))
+                } else {
+                    truncate_end(&s.title, 28)
+                },
                 egui::FontId::proportional(14.0),
                 if selected {
                     theme::text_strong()
@@ -464,6 +481,8 @@ fn welcome_body(app: &mut GagentApp, ui: &mut egui::Ui) {
             app.start_session(&p);
         }
     }
+    ui.add_space(18.0);
+    ui.label(RichText::new("AI can make mistakes. Check the Changes before you apply them, and keep a backup. You use Gagent at your own risk; see SECURITY.md.").small().color(theme::faint()));
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +491,18 @@ fn welcome_body(app: &mut GagentApp, ui: &mut egui::Ui) {
 
 pub fn chat(app: &mut GagentApp, ui: &mut egui::Ui) {
     chat_header(app, ui);
+    let is_team = app.active().is_some_and(|a| a.team.is_some());
+    if let Some(view) = app.active().and_then(|a| a.team.as_ref()).map(|t| t.view()) {
+        Panel::top("team_board")
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(
+                Frame::new()
+                    .fill(theme::bg())
+                    .inner_margin(Margin::symmetric(16, 8)),
+            )
+            .show(ui, |ui| super::project::board(ui, &view));
+    }
     Panel::bottom("composer")
         .resizable(false)
         .show_separator_line(false)
@@ -480,7 +511,13 @@ pub fn chat(app: &mut GagentApp, ui: &mut egui::Ui) {
                 .fill(theme::bg())
                 .inner_margin(Margin::symmetric(16, 8)),
         )
-        .show(ui, |ui| composer(app, ui));
+        .show(ui, |ui| {
+            if is_team {
+                super::project::bar(app, ui)
+            } else {
+                composer(app, ui)
+            }
+        });
 
     let Some(id) = app.current.clone() else {
         return;
@@ -626,6 +663,7 @@ fn messages(app: &mut GagentApp, ui: &mut egui::Ui, id: &str) {
             r.status.clone(),
             r.started.elapsed().as_secs(),
             r.usage.total_tokens,
+            r.last_event.elapsed().as_secs(),
         )
     });
     let sandbox_problem = match &app.docker {
@@ -634,6 +672,11 @@ fn messages(app: &mut GagentApp, ui: &mut egui::Ui, id: &str) {
     };
     let not_configured = !app.settings.is_configured();
     let provider = app.settings.provider_label();
+    let team_view = app.open.get(id).and_then(|a| a.team.as_ref()).map(|t| t.view());
+    let waiting_model = team_view
+        .as_ref()
+        .and_then(|v| v.current_model.clone())
+        .unwrap_or_else(|| app.settings.active_model().to_string());
     let mut open_settings = false;
     let mut recheck = false;
 
@@ -647,7 +690,7 @@ fn messages(app: &mut GagentApp, ui: &mut egui::Ui, id: &str) {
                     Layout::top_down(Align::Min),
                     |ui| {
                         ui.add_space(14.0);
-                        if items.is_empty() {
+                        if items.is_empty() && team_view.is_none() {
                             empty_state(ui);
                         }
                         if not_configured {
@@ -708,7 +751,7 @@ fn messages(app: &mut GagentApp, ui: &mut egui::Ui, id: &str) {
                                 ChatItem::Error(text) => error_card(ui, text),
                             }
                         }
-                        if let Some((status, secs, tokens)) = &run_status {
+                        if let Some((status, secs, tokens, idle)) = &run_status {
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 theme::spinner(ui, 14.0);
@@ -722,6 +765,22 @@ fn messages(app: &mut GagentApp, ui: &mut egui::Ui, id: &str) {
                                 }
                                 ui.label(RichText::new(meta).small().color(theme::faint()));
                             });
+                            if *idle >= 40 {
+                                let usual = crate::modelstats::typical_secs(&waiting_model)
+                                    .map(|t| format!(" It took about {t:.0} s last time."))
+                                    .unwrap_or_default();
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "No answer from {} for {idle} s. Free endpoints queue requests, so some models answer slowly.{usual} You can press stop and choose a faster model (the model menu shows reply times).",
+                                            crate::models::short_name(&waiting_model)
+                                        ))
+                                        .small()
+                                        .color(theme::faint()),
+                                    )
+                                    .wrap(),
+                                );
+                            }
                         }
                         ui.add_space(20.0);
                     },
@@ -763,6 +822,8 @@ fn empty_state(ui: &mut egui::Ui) {
             RichText::new("Describe a task. The agent reads your code, edits files, runs them\nand fixes problems until it works.")
                 .color(theme::muted()),
         );
+        ui.add_space(10.0);
+        ui.label(RichText::new("AI can make mistakes. Check the Changes before you apply them, and keep a backup. You use Gagent at your own risk; see SECURITY.md.").small().color(theme::faint()));
     });
 }
 
@@ -958,6 +1019,8 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
     let mut attach = false;
     let mut remove_attachment: Option<String> = None;
     let mut new_model: Option<String> = None;
+    let mut toggle_auto = false;
+    let mut new_provider: Option<crate::config::Provider> = None;
     let mut new_permission: Option<crate::config::PermissionMode> = None;
 
     ui.vertical_centered(|ui| {
@@ -1040,25 +1103,72 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                             if attach_button.clicked() {
                                 attach = true;
                             }
+                            let auto = app.settings.auto_pick;
+                            if ui
+                                .selectable_label(auto, "Auto")
+                                .on_hover_text("Choose the best available model by itself for every message: it looks at what each model can do (code, images, size) and at the limits that are left, and moves on when one runs out of quota.")
+                                .clicked()
+                            {
+                                toggle_auto = true;
+                            }
+                            ui.add_enabled_ui(!auto, |ui| {
                             let current = app.settings.active_model().to_string();
+                            let usable: Vec<crate::config::Provider> = crate::config::Provider::ALL
+                                .into_iter()
+                                .filter(|p| app.settings.provider_ready(*p))
+                                .collect();
+                            if usable.len() > 1 {
+                                egui::ComboBox::from_id_salt("provider_combo")
+                                    .selected_text(
+                                        RichText::new(app.settings.provider_label())
+                                            .small()
+                                            .color(theme::muted()),
+                                    )
+                                    .width(90.0)
+                                    .show_ui(ui, |ui| {
+                                        for p in &usable {
+                                            if ui
+                                                .selectable_label(*p == app.settings.provider, p.label())
+                                                .clicked()
+                                            {
+                                                new_provider = Some(*p);
+                                            }
+                                        }
+                                    });
+                            }
+                            let shown = format!(
+                                "{}{}",
+                                crate::models::label(&current),
+                                crate::modelstats::hint(&current)
+                            );
                             egui::ComboBox::from_id_salt("model_combo")
                                 .selected_text(
-                                    RichText::new(truncate_end(short_model(&current), 30))
+                                    RichText::new(truncate_end(&shown, 38))
                                         .small()
                                         .color(theme::muted()),
                                 )
-                                .width(220.0)
+                                .width(260.0)
                                 .show_ui(ui, |ui| {
-                                    let mut models = app.models.clone();
-                                    if !models.contains(&current) {
-                                        models.insert(0, current.clone());
-                                    }
-                                    for m in models {
-                                        if ui.selectable_label(m == current, &m).clicked() {
+                                    let show_all = app.show_all_models;
+                                    for m in crate::models::picker_list(&app.models, &current, show_all) {
+                                        if ui
+                                            .selectable_label(
+                                                m == current,
+                                                format!(
+                                                    "{}{}",
+                                                    crate::models::label(&m),
+                                                    crate::modelstats::hint(&m)
+                                                ),
+                                            )
+                                            .clicked()
+                                        {
                                             new_model = Some(m);
                                         }
                                     }
+                                    ui.separator();
+                                    ui.checkbox(&mut app.show_all_models, "Show every model");
                                 });
+                            });
                             let permission = app.settings.permission;
                             egui::ComboBox::from_id_salt("permission_combo")
                                 .selected_text(
@@ -1173,6 +1283,18 @@ fn composer(app: &mut GagentApp, ui: &mut egui::Ui) {
                 a.engine_dirty = true;
             }
             app.refresh_engines_if_idle();
+        }
+    }
+    if toggle_auto {
+        let mut s = app.settings.clone();
+        s.auto_pick = !s.auto_pick;
+        app.commit_settings(s);
+    }
+    if let Some(p) = new_provider {
+        if p != app.settings.provider {
+            let mut s = app.settings.clone();
+            s.provider = p;
+            app.commit_settings(s);
         }
     }
     if let Some(mode) = new_permission {

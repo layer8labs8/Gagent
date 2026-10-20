@@ -1,6 +1,6 @@
 [package]
 name = "gagent"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.89"
 description = "Gagent: a light native desktop coding agent for Gemini, NVIDIA and OpenAI-compatible models; runs code on your own computer, or in Docker / WSL"
@@ -20,6 +20,10 @@ path = "src/bin/gagent.rs"
 [[bin]]
 name = "gagent-cli"
 path = "src/bin/gagent-cli.rs"
+
+[features]
+# A test driver that runs a team project in the real window without clicks. Not for release builds.
+autopilot = []
 
 [dependencies]
 anyhow = "1"

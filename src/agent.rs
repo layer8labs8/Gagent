@@ -30,6 +30,8 @@ const MAX_OLD_ARG_CHARS: usize = 300;
 const MAX_OLD_TEXT_CHARS: usize = 1500;
 /// Hard stop for runaway repetition.
 const MAX_IDENTICAL_REPEATS: u32 = 5;
+/// Malformed tool calls in a row after which the turn is stopped.
+const MAX_MALFORMED_CALLS: u32 = 8;
 
 /// Progress reports for the UI or the terminal.
 #[derive(Clone, Debug)]
@@ -54,6 +56,8 @@ pub enum AgentEvent {
     FilesChanged,
     /// Total token usage of the current turn so far.
     Usage(Usage),
+    /// Something the user should know: another model took over because one ran out of quota.
+    Notice(String),
 }
 
 /// How a turn ended.
@@ -87,7 +91,7 @@ pub struct AgentConfig {
     pub retry_base_delay: Duration,
 }
 
-enum CallError {
+pub(crate) enum CallError {
     Api(ApiError),
     Cancelled,
 }
@@ -107,13 +111,16 @@ pub fn run_turn(
 ) -> TurnResult {
     history.push(json!({ "role": "user", "parts": [ { "text": user_text } ] }));
 
-    let declarations = tools::declarations();
+    let declarations = tools::declarations_for(ctx.vision);
     let mut usage = Usage::default();
     let mut steps = 0;
     let mut final_text = String::new();
     let mut tool_counter: u32 = 0;
     let mut empty_replies = 0;
     let mut repeats: HashMap<String, (String, u32)> = HashMap::new();
+    // Tool calls in a row that failed, and that were malformed.
+    let mut fail_streak: u32 = 0;
+    let mut slip_streak: u32 = 0;
 
     let finish = |end: TurnEnd, final_text: String, usage: Usage, steps: u32| TurnResult {
         end,
@@ -177,6 +184,8 @@ pub fn run_turn(
         }
 
         let mut response_parts = Vec::new();
+
+        let mut image_parts: Vec<Value> = Vec::new();
         for call in &reply.calls {
             if cancel.load(Ordering::Relaxed) {
                 // Every function call must be answered, otherwise the history becomes invalid.
@@ -187,7 +196,7 @@ pub fn run_turn(
             let id = tool_counter;
             emit(AgentEvent::ToolStart {
                 id,
-                name: call.name.clone(),
+                name: tools::canonical_tool_name(&call.name),
                 summary: tools::describe_call(&call.name, &call.args),
             });
             emit(AgentEvent::Status(format!(
@@ -211,6 +220,16 @@ pub fn run_turn(
                 out.text.push_str("\n[You already made this exact call and got this same result. Change your approach instead of repeating it.]");
             }
 
+            let who = client.serving_model().unwrap_or_else(|| cfg.model.clone());
+            crate::modelstats::record_tool_call(&who, out.slip);
+            fail_streak = if out.ok { 0 } else { fail_streak + 1 };
+            slip_streak = if out.slip { slip_streak + 1 } else { 0 };
+            if slip_streak >= 2 {
+                out.text.push_str(&format!("\n[{slip_streak} malformed tool calls in a row. Call one of the listed tools by its exact name, with one JSON object that holds the parameters from its description.]"));
+            } else if fail_streak >= 3 && fail_streak % 3 == 0 {
+                out.text.push_str(&format!("\n[{fail_streak} tool calls in a row failed. Stop and read the error text; open the file with read_file to see what is really there; fix the cause before you run anything again. Do not repeat or guess.]"));
+            }
+
             emit(AgentEvent::ToolEnd {
                 id,
                 ok: out.ok,
@@ -222,8 +241,22 @@ pub fn run_turn(
                 emit(AgentEvent::FilesChanged);
             }
             response_parts.push(function_response(call, out.ok, &out.text));
+            image_parts.extend(out.images.iter().map(|i| i.part()));
 
+            if slip_streak >= MAX_MALFORMED_CALLS {
+                response_parts.append(&mut image_parts);
+                history.push(json!({ "role": "user", "parts": response_parts }));
+                return finish(
+                    TurnEnd::Failed(
+                        "The model keeps sending malformed tool calls and was stopped. Pick another model (Auto avoids models that do this).".into(),
+                    ),
+                    final_text,
+                    usage,
+                    steps,
+                );
+            }
             if seen >= MAX_IDENTICAL_REPEATS {
+                response_parts.append(&mut image_parts);
                 history.push(json!({ "role": "user", "parts": response_parts }));
                 return finish(
                     TurnEnd::Failed(
@@ -235,6 +268,7 @@ pub fn run_turn(
                 );
             }
         }
+        response_parts.append(&mut image_parts);
         history.push(json!({ "role": "user", "parts": response_parts }));
     }
 }
@@ -249,7 +283,7 @@ fn function_response(call: &FunctionCall, ok: bool, text: &str) -> Value {
 }
 
 /// Calls the API without blocking cancellation, retrying temporary failures.
-fn call_model(
+pub(crate) fn call_model(
     client: &Arc<dyn ModelClient>,
     cfg: &AgentConfig,
     history: &[Value],
@@ -285,6 +319,9 @@ fn call_model(
                 }
             }
         };
+        for note in client.take_notices() {
+            emit(AgentEvent::Notice(note));
+        }
         match result {
             Ok(reply) => return Ok(reply),
             Err(e) if e.is_retryable() && attempt < MAX_RETRIES => {
@@ -342,7 +379,9 @@ const CONTENT_ARGS: &[(&str, &[&str])] = &[
 ///
 /// The newest messages and all user messages are left alone.
 pub fn compact_history(history: &mut [Value]) {
-    let size: usize = history.iter().map(|m| m.to_string().len()).sum();
+    // Pictures cost a lot every time they are sent: only the newest messages keep theirs.
+    crate::vision::drop_old_images(history, KEEP_RECENT_MESSAGES);
+    let size = crate::vision::history_chars(history);
     if size < COMPACT_THRESHOLD_CHARS || history.len() <= KEEP_RECENT_MESSAGES {
         return;
     }

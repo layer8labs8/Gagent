@@ -41,6 +41,56 @@ impl ApiError {
         }
     }
 
+    /// How long this error keeps the model unusable, in seconds: a daily or monthly quota that is
+    /// used up (`None` for a short rate limit that passes in a minute).
+    pub fn quota_block_secs(&self) -> Option<u64> {
+        let ApiError::Http {
+            status,
+            message,
+            retry_after,
+        } = self
+        else {
+            return None;
+        };
+        let lower = message.to_ascii_lowercase();
+        match *status {
+            402 => Some(24 * 3600),
+            429 => {
+                let long = retry_after
+                    .filter(|s| *s > 120)
+                    .or_else(|| retry_hint_secs(message).filter(|s| *s > 120));
+                if let Some(secs) = long {
+                    return Some(secs.min(24 * 3600));
+                }
+                if ["per day", "perday", "daily", "requests per d"]
+                    .iter()
+                    .any(|k| lower.contains(k))
+                {
+                    return Some(6 * 3600);
+                }
+                if ["month", "credit", "billing", "exhausted"]
+                    .iter()
+                    .any(|k| lower.contains(k))
+                {
+                    return Some(24 * 3600);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// The trouble is with this model or service, so another one may work.
+    pub fn should_try_another(&self) -> bool {
+        match self {
+            ApiError::Http { status, .. } => {
+                matches!(status, 401 | 402 | 403 | 404 | 413 | 429 | 500 | 502 | 503 | 504)
+            }
+            ApiError::Malformed(_) | ApiError::Blocked(_) => true,
+            ApiError::Transport(_) => false,
+        }
+    }
+
     /// A message suitable for showing to the user.
     pub fn user_message(&self) -> String {
         match self {
@@ -203,15 +253,26 @@ impl GeminiClient {
             body["tools"] = json!([ { "functionDeclarations": tool_declarations } ]);
             body["toolConfig"] = json!({ "functionCallingConfig": { "mode": "AUTO" } });
         }
+        let host = crate::ratelimit::host_of(&url);
+        let started = std::time::Instant::now();
         let response = self
             .http
             .post_json(&url, &self.headers(), &body)
             .map_err(|e| ApiError::Transport(e.0))?;
         if !response.is_success() {
-            return Err(http_error(&response));
+            let error = http_error(&response);
+            note_failure(&host, model, &error);
+            return Err(error);
         }
         let value = response.json().map_err(ApiError::Malformed)?;
-        parse_reply(&value)
+        let reply = parse_reply(&value)?;
+        crate::modelstats::record_ok(
+            &host,
+            model,
+            started.elapsed().as_secs_f32(),
+            reply.usage.total_tokens,
+        );
+        Ok(reply)
     }
 
     /// Lists the models that support `generateContent`. Doubles as an API key check.
@@ -241,6 +302,15 @@ impl GeminiClient {
             }
         }
         Ok(sort_models(models))
+    }
+}
+
+/// Remembers what an error says about the model: a used-up quota, or "not found".
+pub(crate) fn note_failure(host: &str, model: &str, error: &ApiError) {
+    if let Some(secs) = error.quota_block_secs() {
+        crate::modelstats::record_limited(host, model, secs, &error.user_message());
+    } else if matches!(error, ApiError::Http { status: 404, .. }) {
+        crate::modelstats::record_missing(host, model);
     }
 }
 
@@ -472,6 +542,36 @@ mod tests {
         assert!(!e.is_retryable());
         assert!(e.user_message().contains("Settings"));
         assert!(ApiError::Transport("x".into()).is_retryable());
+    }
+
+    #[test]
+    fn quota_errors_say_how_long_the_model_stays_blocked() {
+        let http = |status, message: &str, retry_after| ApiError::Http {
+            status,
+            message: message.into(),
+            retry_after,
+        };
+        // "retry in 22h" is a daily quota; a short wait is only a rate limit.
+        assert_eq!(
+            http(429, "Please retry in 22h30.6s", None).quota_block_secs(),
+            Some(79230)
+        );
+        assert_eq!(http(429, "Please retry in 28s", Some(28)).quota_block_secs(), None);
+        assert_eq!(
+            http(429, "Quota exceeded: GenerateRequestsPerDayPerProjectPerModel-FreeTier", None)
+                .quota_block_secs(),
+            Some(6 * 3600)
+        );
+        assert_eq!(
+            http(429, "You exceeded your monthly credits", None).quota_block_secs(),
+            Some(24 * 3600)
+        );
+        assert_eq!(http(402, "payment required", None).quota_block_secs(), Some(24 * 3600));
+        assert_eq!(http(500, "oops", None).quota_block_secs(), None);
+        assert!(http(429, "x", None).should_try_another());
+        assert!(http(404, "x", None).should_try_another());
+        assert!(!http(400, "bad request", None).should_try_another());
+        assert!(!ApiError::Transport("offline".into()).should_try_another());
     }
 
     #[test]

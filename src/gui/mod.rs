@@ -4,10 +4,13 @@
 //! project, calling Gemini, running Docker, talking to the AI) happens on worker
 //! threads that report back through a channel of [`Msg`] values.
 
+#[cfg(feature = "autopilot")]
+mod autopilot;
 mod markdown;
 mod panels;
 mod state;
 mod theme;
+mod project;
 mod views;
 mod worker;
 
@@ -39,6 +42,7 @@ fn preference(appearance: crate::config::Appearance) -> ThemePreference {
 
 pub fn run(dirs: AppDirs) -> eframe::Result {
     crate::engine::install_crash_log(&dirs);
+    crate::modelstats::init(dirs.root());
     // Held until the window closes; see `claim_instance`.
     let _instance = crate::engine::claim_instance(&dirs);
     let appearance = Settings::load(&dirs).appearance;
@@ -101,6 +105,12 @@ pub struct GagentApp {
     pub(crate) models_loading: bool,
     pub(crate) key_status: Option<(bool, String)>,
     pub(crate) show_key: bool,
+    /// Offer every model of the provider in the picker, not only the chat models.
+    pub(crate) show_all_models: bool,
+    /// The New project screen, while it is open.
+    pub(crate) project_draft: Option<project::ProjectDraft>,
+    #[cfg(feature = "autopilot")]
+    autopilot: Option<autopilot::Autopilot>,
     pub(crate) banner: Option<Banner>,
     pub(crate) new_project_path: String,
     pub(crate) confirm_delete: Option<String>,
@@ -144,6 +154,10 @@ impl GagentApp {
             models_loading: false,
             key_status: None,
             show_key: false,
+            show_all_models: false,
+            project_draft: None,
+            #[cfg(feature = "autopilot")]
+            autopilot: autopilot::Autopilot::from_env(),
             banner: None,
             new_project_path: settings.last_project.clone(),
             confirm_delete: None,
@@ -155,6 +169,15 @@ impl GagentApp {
         app.check_docker();
         if app.settings.is_configured() {
             app.load_models();
+        }
+        {
+            // Which models each service really has (names change); done in the background.
+            let settings = app.settings.clone();
+            std::thread::spawn(move || crate::router::refresh_live_models(&settings));
+        }
+        // For screenshots and tests: open the New project screen at start.
+        if std::env::var_os("GAGENT_OPEN_PROJECT").is_some() {
+            app.open_project_draft();
         }
         app
     }
@@ -235,6 +258,7 @@ impl GagentApp {
                 }
             }
         }
+        self.project_draft = None;
         self.current = Some(id.to_string());
         let needs_engine = matches!(
             self.open.get(id).map(|a| &a.engine),
@@ -354,6 +378,7 @@ impl GagentApp {
             status: "Starting...".into(),
             started: Instant::now(),
             usage: Default::default(),
+            last_event: Instant::now(),
         });
         active.log_info("Task started");
         let history = active.session.history.clone();
@@ -547,9 +572,21 @@ impl GagentApp {
                 };
                 match engine {
                     Ok(e) => {
+                        let work = e.work_dir();
                         a.engine = EngineState::Ready(e);
                         a.log_info("Workspace ready");
+                        // A team project shows the plan it already has, or starts planning.
+                        let mut start = false;
+                        if let Some(t) = a.team.as_mut() {
+                            if t.plan.is_none() {
+                                t.plan = crate::team::Plan::load(&work);
+                            }
+                            start = std::mem::take(&mut t.start_when_ready);
+                        }
                         self.refresh_changes_for(&session);
+                        if start {
+                            self.start_team(&session, false);
+                        }
                     }
                     Err(e) => {
                         a.log_error(&e);
@@ -558,6 +595,8 @@ impl GagentApp {
                 }
             }
             Msg::Agent { session, event } => self.handle_agent_event(&session, event),
+            Msg::Team { session, event } => self.handle_team_event(&session, event),
+            Msg::TeamDone { session, outcome } => self.handle_team_done(&session, outcome),
             Msg::TurnDone {
                 session,
                 outcome,
@@ -736,6 +775,9 @@ impl GagentApp {
         let Some(a) = self.open.get_mut(session) else {
             return;
         };
+        if let Some(run) = a.run.as_mut() {
+            run.last_event = Instant::now();
+        }
         match event {
             AgentEvent::Status(s) => {
                 if let Some(run) = a.run.as_mut() {
@@ -797,11 +839,18 @@ impl GagentApp {
                     run.usage = u;
                 }
             }
+            AgentEvent::Notice(text) => {
+                a.log_info(&text);
+                a.session.items.push(ChatItem::Notice(text));
+                a.scroll_to_bottom = true;
+            }
         }
     }
 
     /// Periodic housekeeping, called every frame.
     fn tick(&mut self) {
+        #[cfg(feature = "autopilot")]
+        autopilot::step(self);
         if let Some(b) = &self.banner {
             if Instant::now() > b.until {
                 self.banner = None;
@@ -888,7 +937,9 @@ impl eframe::App for GagentApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::bg()))
             .show(ui, |ui| {
-                if self.current.is_some() {
+                if self.project_draft.is_some() {
+                    project::draft_screen(self, ui);
+                } else if self.current.is_some() {
                     views::chat(self, ui);
                 } else {
                     views::welcome(self, ui);

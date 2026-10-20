@@ -22,6 +22,9 @@ use crate::llm::ModelClient;
 /// NVIDIA's hosted API (keys start with `nvapi-`, create one at build.nvidia.com).
 pub const NVIDIA_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
 
+/// Groq's hosted models (keys start with `gsk_`, create one at console.groq.com/keys).
+pub const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
+
 /// Model ids that are not chat models and are hidden from the model list.
 const NOT_CHAT: &[&str] = &[
     "embed",
@@ -105,15 +108,55 @@ impl OpenAiClient {
         let auth = self.auth_header();
         let headers: Vec<(&str, &str)> =
             auth.iter().map(|a| ("Authorization", a.as_str())).collect();
+        // `GAGENT_DEBUG=1` prints what is sent and how long the server took (never the key).
+        let debug = std::env::var_os("GAGENT_DEBUG").is_some();
+        let started = std::time::Instant::now();
+        if debug {
+            eprintln!(
+                "[debug] POST {url} model={} messages={} tools={} max_tokens={} text_mode={text_mode}",
+                model.trim(),
+                body["messages"].as_array().map_or(0, Vec::len),
+                body["tools"].as_array().map_or(0, Vec::len),
+                self.max_tokens,
+            );
+        }
         let response = self
             .http
             .post_json(&url, &headers, &body)
-            .map_err(|e| ApiError::Transport(e.0))?;
+            .map_err(|e| {
+                if debug {
+                    eprintln!("[debug] failed after {:.1}s: {}", started.elapsed().as_secs_f32(), e.0);
+                }
+                ApiError::Transport(e.0)
+            })?;
+        if debug {
+            eprintln!(
+                "[debug] status {} after {:.1}s, {} bytes{}",
+                response.status,
+                started.elapsed().as_secs_f32(),
+                response.body.len(),
+                if response.is_success() {
+                    String::new()
+                } else {
+                    format!(": {}", crate::util::truncate_end(response.text().trim(), 300))
+                }
+            );
+        }
+        let host = crate::ratelimit::host_of(&url);
         if !response.is_success() {
-            return Err(http_error(&response));
+            let error = http_error(&response);
+            crate::gemini::note_failure(&host, model.trim(), &error);
+            return Err(error);
         }
         let value = response.json().map_err(ApiError::Malformed)?;
-        parse_reply(&value)
+        let reply = parse_reply(&value)?;
+        crate::modelstats::record_ok(
+            &host,
+            model.trim(),
+            started.elapsed().as_secs_f32(),
+            reply.usage.total_tokens,
+        );
+        Ok(reply)
     }
 
     fn auth_header(&self) -> Option<String> {
@@ -315,8 +358,16 @@ pub fn to_messages(system: &str, contents: &[Value], text_mode: bool) -> Vec<Val
             out.push(assistant);
         } else {
             let mut user_text = String::new();
+            let mut pictures: Vec<Value> = Vec::new();
             for part in &parts {
-                if let Some(response) = part.get("functionResponse").filter(|r| r.is_object()) {
+                if let Some(image) = part.get("inlineData").filter(|i| i.is_object()) {
+                    let mime = image["mimeType"].as_str().unwrap_or("image/png");
+                    let data = image["data"].as_str().unwrap_or_default();
+                    pictures.push(json!({
+                        "type": "image_url",
+                        "image_url": { "url": format!("data:{mime};base64,{data}") },
+                    }));
+                } else if let Some(response) = part.get("functionResponse").filter(|r| r.is_object()) {
                     let name = response["name"].as_str().unwrap_or_default();
                     let content = response_text(&response["response"]);
                     if text_mode {
@@ -349,6 +400,16 @@ pub fn to_messages(system: &str, contents: &[Value], text_mode: bool) -> Vec<Val
             }
             if !user_text.trim().is_empty() {
                 out.push(json!({ "role": "user", "content": user_text }));
+            }
+            // A tool message holds only text, so the pictures of a tool result follow as a
+            // message of the user.
+            if !pictures.is_empty() {
+                let mut content = vec![json!({
+                    "type": "text",
+                    "text": "The picture(s) from the tool result above:",
+                })];
+                content.extend(pictures);
+                out.push(json!({ "role": "user", "content": content }));
             }
         }
     }
@@ -414,14 +475,15 @@ pub fn parse_reply(value: &Value) -> Result<ModelReply, ApiError> {
             if name.is_empty() {
                 continue;
             }
+            // `run_command<|channel|>commentary` and the like: keep the tool's own name.
+            let name = crate::tools::canonical_tool_name(&name);
             let id = tc["id"]
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| format!("call_{}", i + 1));
             let args = match &tc["function"]["arguments"] {
-                Value::String(s) if s.trim().is_empty() => json!({}),
-                Value::String(s) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
+                Value::String(s) => lenient_args(s),
                 Value::Object(_) => tc["function"]["arguments"].clone(),
                 _ => json!({}),
             };
@@ -536,11 +598,11 @@ fn parse_call_body(body: &str) -> Option<(String, Value)> {
         .or_else(|| body.strip_prefix("```"))
         .unwrap_or(body);
     let body = body.strip_suffix("```").unwrap_or(body).trim();
-    let value: Value = serde_json::from_str(body).ok()?;
+    let value = lenient_value(body)?;
     let name = value["name"]
         .as_str()
-        .filter(|n| !n.is_empty())?
-        .to_string();
+        .filter(|n| !n.is_empty())
+        .map(crate::tools::canonical_tool_name)?;
     let args = ["arguments", "args", "parameters"]
         .iter()
         .find_map(|k| value.get(*k))
@@ -548,10 +610,91 @@ fn parse_call_body(body: &str) -> Option<(String, Value)> {
         .unwrap_or_else(|| json!({}));
     let args = match args {
         // Some models quote the arguments object.
-        Value::String(s) => serde_json::from_str(&s).unwrap_or_else(|_| json!({})),
+        Value::String(s) => lenient_args(&s),
         other => other,
     };
     Some((name, args))
+}
+
+/// The arguments of a tool call as an object. Models send almost-JSON: raw line breaks inside
+/// strings, a code fence around it, text after it, or the object quoted a second time. What
+/// cannot be read at all comes back as `{INVALID_ARGS: <what was sent>}`, so the tool can say
+/// so (instead of running with no arguments and complaining about a missing one).
+pub fn lenient_args(raw: &str) -> Value {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return json!({});
+    }
+    match lenient_value(raw) {
+        Some(Value::Object(map)) => Value::Object(map),
+        Some(Value::Null) => json!({}),
+        Some(Value::String(inner)) => lenient_args(&inner),
+        _ => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                crate::tools::INVALID_ARGS.to_string(),
+                Value::String(raw.chars().take(300).collect()),
+            );
+            Value::Object(map)
+        }
+    }
+}
+
+/// The first JSON value in `text`, also when it is not quite valid JSON.
+pub fn lenient_value(text: &str) -> Option<Value> {
+    let t = text.trim();
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .unwrap_or(t);
+    let t = t.strip_suffix("```").unwrap_or(t).trim();
+    if let Ok(v) = serde_json::from_str::<Value>(t) {
+        return Some(v);
+    }
+    let fixed = escape_raw_control_chars(t);
+    if let Ok(v) = serde_json::from_str::<Value>(&fixed) {
+        return Some(v);
+    }
+    // Text around the object: take the first value and ignore the rest.
+    let start = fixed.find('{')?;
+    serde_json::Deserializer::from_str(&fixed[start..])
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+}
+
+/// JSON does not allow raw line breaks and tabs inside strings, but models write them there.
+fn escape_raw_control_chars(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let (mut in_string, mut escaped) = (false, false);
+    for c in text.chars() {
+        if !in_string {
+            if c == '"' {
+                in_string = true;
+            }
+            out.push(c);
+        } else if escaped {
+            escaped = false;
+            out.push(c);
+        } else {
+            match c {
+                '\\' => {
+                    escaped = true;
+                    out.push(c);
+                }
+                '"' => {
+                    in_string = false;
+                    out.push(c);
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+    }
+    out
 }
 
 /// Removes the model's visible reasoning (`<think>...</think>`) from an answer.
@@ -604,6 +747,74 @@ pub fn parse_models(value: &Value) -> Vec<ModelInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_of_a_tool_result_follow_as_a_user_message() {
+        let history = vec![
+            json!({"role":"user","parts":[{"text":"look at the page"}]}),
+            json!({"role":"model","parts":[
+                {"functionCall":{"name":"screenshot","args":{"path":"index.html"}}}
+            ]}),
+            json!({"role":"user","parts":[
+                {"functionResponse":{"name":"screenshot","response":{"output":"Screenshot saved."}}},
+                {"inlineData":{"mimeType":"image/png","data":"QUJD"}}
+            ]}),
+        ];
+        let messages = to_messages("sys", &history, false);
+        let tool = messages.iter().position(|m| m["role"] == "tool").unwrap();
+        assert_eq!(messages[tool]["content"], "Screenshot saved.");
+        let last = messages.last().unwrap();
+        assert_eq!(last["role"], "user");
+        assert_eq!(last["content"][1]["type"], "image_url");
+        assert_eq!(last["content"][1]["image_url"]["url"], "data:image/png;base64,QUJD");
+        assert!(messages.len() > tool + 1, "the picture comes after the tool message");
+    }
+
+    #[test]
+    fn nearly_valid_tool_arguments_are_read() {
+        // A raw line break inside a string.
+        let a = lenient_args("{\"path\": \"a.py\", \"content\": \"x = 1\ny = 2\"}");
+        assert_eq!(a["content"], "x = 1\ny = 2");
+        // A code fence, text after the object, the object quoted a second time.
+        assert_eq!(lenient_args("```json\n{\"path\": \"a\"}\n```")["path"], "a");
+        assert_eq!(lenient_args("{\"path\": \"a\"} and that is all")["path"], "a");
+        assert_eq!(lenient_args("\"{\\\"path\\\": \\\"a\\\"}\"")["path"], "a");
+        assert_eq!(lenient_args("  "), json!({}));
+        assert_eq!(lenient_args("null"), json!({}));
+        // Cut off in the middle: said so, not run with no arguments.
+        let bad = lenient_args("{\"path\": \"a.py\", \"content\": \"print(");
+        assert!(bad[crate::tools::INVALID_ARGS].as_str().unwrap().contains("a.py"));
+        assert!(lenient_args("not json at all")[crate::tools::INVALID_ARGS].is_string());
+    }
+
+    #[test]
+    fn a_tool_call_in_a_foreign_format_is_cleaned() {
+        let v = json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [
+                        {"id": "c1", "function": {"name": "run_command<|channel|>commentary", "arguments": "{\"command\": \"ls\"}"}},
+                        {"id": "c2", "function": {"name": "functions.write_file", "arguments": "{\"path\": \"a.txt\", \"content\": \"1\n2\"}"}},
+                        {"id": "c3", "function": {"name": "read_file", "arguments": "{\"path\": "}}
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let r = parse_reply(&v).unwrap();
+        assert_eq!(r.calls[0].name, "run_command");
+        assert_eq!(r.calls[0].args["command"], "ls");
+        assert_eq!(r.calls[1].name, "write_file");
+        assert_eq!(r.calls[1].args["content"], "1\n2");
+        assert_eq!(r.calls[2].name, "read_file");
+        assert!(r.calls[2].args.get(crate::tools::INVALID_ARGS).is_some());
+        // The text format is read the same way.
+        let (_, found) = extract_text_calls(
+            "<tool_call>{\"name\": \"Bash\", \"arguments\": {\"command\": \"ls\"}} trailing</tool_call>",
+        );
+        assert_eq!(found[0].0, "run_command");
+    }
 
     #[test]
     fn tool_schemas_are_converted() {

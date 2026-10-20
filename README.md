@@ -7,7 +7,7 @@
 **A coding agent that lives on your desktop and barely touches your computer.**
 
 Open a folder, describe a task, and Gagent reads, edits, runs and tests your code until it works.<br>
-Gemini · NVIDIA · any OpenAI-compatible API · one small native app · no browser · no Docker needed
+Gemini · NVIDIA · Groq · any OpenAI-compatible API · one small native app · no browser · no Docker needed
 
 [![CI](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml/badge.svg)](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-free%20to%20use%2C%20not%20for%20sale-blue.svg)](#license)
@@ -31,7 +31,7 @@ Gemini · NVIDIA · any OpenAI-compatible API · one small native app · no brow
 - **Light.** One native program written in Rust (egui). No Electron, no browser, no local web server, no virtual machine.
   Commands run directly on your own computer, at low priority, so a weak laptop stays cool and usable.
 - **Bring your own model.** Gemini (free tier), NVIDIA's hosted models on [build.nvidia.com](https://build.nvidia.com)
-  (free credits), or anything that speaks the OpenAI API: OpenRouter, Ollama, LM Studio, vLLM. Models without function
+  (free credits), [Groq](https://console.groq.com/keys) (very fast, free plan), or anything that speaks the OpenAI API: OpenRouter, Ollama, LM Studio, vLLM. Models without function
   calling work too, through a text fallback.
 - **Your project is never touched while it works.** The agent edits a private copy. You review a diff, apply it, and can
   undo the last apply.
@@ -65,6 +65,7 @@ gagent
 | Service | Where | Cost |
 |---|---|---|
 | Google Gemini | [Google AI Studio](https://aistudio.google.com/apikey) ("Create API key"); [guide](https://ai.google.dev/gemini-api/docs/api-key) | free tier with a daily quota |
+| Groq | [console.groq.com/keys](https://console.groq.com/keys) ("Create API Key", it starts with `gsk_`) | free plan with limits per minute and per day |
 | NVIDIA-hosted models | [build.nvidia.com](https://build.nvidia.com): sign in, open a model, press "Get API Key" (or go to your [API keys](https://build.nvidia.com/settings/api-keys)); [quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart). The key starts with `nvapi-` | free credits for developers |
 | Any OpenAI-compatible server | [OpenRouter](https://openrouter.ai), [Ollama](https://ollama.com) and [LM Studio](https://lmstudio.ai) run locally or in the cloud; the address ends in `/v1` | local servers need no key |
 
@@ -87,6 +88,24 @@ tells you what it needs.
 
 - Agent loop with tools: list, read, search, write, edit, delete files and run commands; retries on rate limits, stop
   button, long-session history compaction, switch provider at any time.
+- **Team projects.** *New project* in the sidebar: add AI agents one by one (provider, model, role, token limit). The lead writes a plan
+  with a contract between the parts, you approve it, and each agent does its tasks on its own model, leaving a note for the next one.
+  A task that fails is taken over by another agent. A board shows every task and who does it; the Changes tab shows the result.
+  Also from the command line: `gagent-cli team`.
+- **It chooses for you.** Every free service has its own limits: Gemini a few requests a day, NVIDIA credits and 40 requests a minute,
+  Groq fast answers but small token limits. Switch on **Auto** (next to the message box) and Gagent picks the best model that is still
+  available for every message: it looks at what each model can do (code, images, size), how fast it answered before, and what is left of
+  its quota. When a model runs out of quota or fails, the next one takes over and the chat tells you. In a team project, **Auto team**
+  builds the team the same way (a strong lead, coders from different services so their limits are separate, a tester that sees images),
+  and the lead gives each task to the model that fits it.
+- **Switch model any time.** Provider and model sit next to the message box, in every session. Each model is marked with what it can
+  do (`[images]`, `[code]`, `[reasoning]`), and speech, embedding and safety models are hidden unless you ask for them. One NVIDIA key
+  works for all of NVIDIA's models; Gemini and other servers use their own keys.
+- **Models that can see.** With a model marked `[images]` the agent gets `screenshot` (renders your page with the browser that is
+  already installed, no extra download) and `view_image`, so it can check the layout and looks, not only the code. A picture costs
+  tokens, so only the newest ones stay in the conversation and sessions are saved without pictures.
+- **Request limit.** On NVIDIA's free endpoint Gagent keeps to 35 requests a minute (it allows about 40 for the whole account),
+  shared by everything that uses the key. Change it in Settings.
 - **Changes tab**: per-file diff, apply selected or all, discard, undo, optional auto-apply.
 - **Quick checks** right after a file is written (Python, JavaScript, JSON syntax) so mistakes show up in the same step.
 - Sandbox tab, activity log, light and dark blue theme, drag and drop files into the workspace.
@@ -124,6 +143,9 @@ Commands run on your own computer by default, so Gagent is careful:
 
 - **Always refused**, in every mode: shutting down or restarting, formatting or partitioning disks, registry edits,
   `sudo`, `rm -rf` on the root or home folder, fork bombs, encoded PowerShell.
+- **You are responsible for what you run.** AI models can be wrong, and Gagent is provided as it is, without warranty (see
+  [LICENSE](LICENSE) and [SECURITY.md](SECURITY.md)). Read the Changes before you apply them, keep a backup, and do not open projects
+  you do not trust.
 - This is a seat belt, not a vault: a command on your own computer is not isolated like a container. If you run untrusted
   projects, choose **Docker** in Settings → Sandbox for real isolation.
 
@@ -133,6 +155,7 @@ Commands run on your own computer by default, so Gagent is careful:
 |---|---|---|
 | Gemini | `GEMINI_API_KEY` or Settings | free tier has a daily quota |
 | NVIDIA | `NVIDIA_API_KEY` or Settings | e.g. `nvidia/nemotron-3-ultra-550b-a55b` |
+| Groq | `GROQ_API_KEY` or Settings | very fast; the free plan limits tokens per minute, so big requests go to other services |
 | OpenAI-compatible | `OPENAI_API_KEY` or Settings + base URL | OpenAI, OpenRouter, Ollama, LM Studio, vLLM |
 
 Text-only models (no function calling) are supported through a `<tool_call>` text fallback; *Settings → Tool mode* lets you
@@ -156,7 +179,14 @@ gagent-cli run "fix the failing test" --folder ./myproject --apply
 gagent-cli run "add tests" --yes                 # do not ask before installs
 gagent-cli --provider nvidia run "add tests" --model nvidia/nemotron-3-ultra-550b-a55b
 gagent-cli --provider nvidia models
+gagent-cli run "fix the failing test" --auto       # picks the best available model, moves on when one runs out of quota
 gagent-cli doctor
+
+# A team made from the services you have keys for (strong lead, coders from different services, a tester that sees images)
+gagent-cli team "a notes page with search" --auto-team --yes --apply
+
+# A team: the lead plans, the agents do the tasks one by one, each on its own model
+gagent-cli team "a notes page with search" --yes --apply   -a nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b:lead   -a nvidia:nvidia/nemotron-3.5-lightning-30b-a3b:coder   -a nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b:tester
 ```
 
 In a terminal the CLI asks the same questions as the app. Without a terminal (scripts, CI) the answer is *no* unless you
@@ -193,9 +223,15 @@ src/gui/           egui desktop app                     src/bin/           gagen
 tests/             mock model servers and real sandbox tests
 ```
 
+## What is new
+
+See [CHANGELOG.md](CHANGELOG.md): version 0.2.0 brings team projects, Groq, the automatic choice of the model, screenshots and
+picture reading, and the model menu with reply times.
+
 ## Roadmap
 
-Next: a first-run guide, plan mode, a token meter, streaming and installers. Later: **several agents working together**
+Done: model switching with capability tags, the shared request limit, screenshots and picture reading, team projects (plan,
+agents, board). Next: a first-run guide, plan mode, a token meter, streaming and installers. Later: **several agents working together**
 (planner, workers and a reviewer, each with its own copy of the project and its own token budget), model routing between a
 strong and a cheap model, MCP tools, local-model tuning and benchmarks. The full list, with the places where help is
 welcome, is in [ROADMAP.md](ROADMAP.md).

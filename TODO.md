@@ -11,6 +11,10 @@
 - Permissions (ask before installs and risky commands): unit tests and tool-level tests with an answering stub. The
   question card in the window and the terminal prompt are written but have not been clicked through by hand yet.
 
+- Team projects: unit tests for plans and the window's event handling, tests against a scripted server (plan repair, order, handoff
+  notes, retry by another agent, resume), and real runs with four NVIDIA models that built a calculator page with passing tests.
+  The New project screen was looked at in a screenshot; the clicks (Create plan, Start, Stop, Continue) have not been tried by hand yet.
+
 ## Not verified
 
 1. Gemini with a real key (only a mock server and an invalid-key request were used).
