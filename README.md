@@ -9,10 +9,13 @@
 Open a folder, describe a task, and Gagent reads, edits, runs and tests your code until it works.<br>
 Gemini · NVIDIA · Groq · any OpenAI-compatible API · one small native app · no browser · no Docker needed
 
+**No telemetry · no account · nothing is sent to the authors.** Your files and keys go only to the AI service you choose.
+
 [![CI](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml/badge.svg)](https://github.com/layer8labs8/Gagent/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-free%20to%20use%2C%20not%20for%20sale-blue.svg)](#license)
 [![Release](https://img.shields.io/github/v/release/layer8labs8/Gagent?include_prereleases)](https://github.com/layer8labs8/Gagent/releases)
 ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+![Telemetry](https://img.shields.io/badge/telemetry-none-brightgreen)
 [![Stars](https://img.shields.io/github/stars/layer8labs8/Gagent?style=social)](https://github.com/layer8labs8/Gagent/stargazers)
 
 [Quick start](#quick-start) · [What you need](#what-do-i-need-to-install) · [Safety](#safety-and-permissions) · [Disclaimer](#disclaimer-free-tool-use-at-your-own-risk) · [Providers](#providers) · [Command line](#command-line) · [Roadmap](ROADMAP.md) · [Build](#build-from-source)
